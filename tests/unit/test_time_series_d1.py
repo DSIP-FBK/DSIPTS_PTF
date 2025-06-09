@@ -33,7 +33,8 @@ def test_data():
                         'feature_0': np.sin(t/10 + group_idx) + np.random.normal(0, 0.1),
                         'feature_1': np.cos(t/10 + group_idx) + np.random.normal(0, 0.1),
                         'target_0': np.sin(t/5 + group_idx) + np.random.normal(0, 0.1),
-                        'cat_feature': f'cat_{np.random.randint(0, 3)}'
+                        'cat_feature': f'cat_{np.random.randint(0, 3)}',
+                        'static_feature': float(group_idx) * 10
                     }
                     data.append(row)
         
@@ -48,7 +49,8 @@ def test_data():
         'time_col': 'time',
         'feature_cols': ['feature_0', 'feature_1'],
         'target_cols': ['target_0'],
-        'cat_cols': ['cat_feature']
+        'cat_cols': ['cat_feature'],
+        'static_cols': ['static_feature']
     }
     
     # Yield the test data parameters
@@ -148,110 +150,145 @@ def test_known_unknown_cols(test_data):
         target_cols=test_data['target_cols'],
         cat_cols=test_data['cat_cols'],
         known_cols=['feature_0'],  # Only feature_0 is known at prediction time
-        )
-        
-        # Check that the dataset was initialized correctly
-        assert len(d1_dataset.file_paths) == 2
-        assert d1_dataset.time_col == 'time'
-        assert d1_dataset.group_cols == ['group']
-        assert d1_dataset.feature_cols == ['feature_0', 'feature_1']
-        assert d1_dataset.target_cols == ['target_0']
-        assert d1_dataset.cat_cols == ['cat_feature']
-        assert not d1_dataset.memory_efficient
-        # Get data for the first group
-        group_id = 0
-        group_data = d1_dataset._load_group_data(group_id)
-        
-        # Check that the returned data has the expected format
-        self.assertTrue(isinstance(group_data, pd.DataFrame))
-        self.assertTrue(self.time_col in group_data.columns)
-        for col in self.feature_cols:
-            self.assertTrue(col in group_data.columns)
-        for col in self.target_cols:
-            self.assertTrue(col in group_data.columns)
+        unknown_cols=['feature_1', 'target_0']  # feature_1 and target_0 are unknown
+    )
     
-    def test_get_group_data(self):
-        """Test _get_group_data method."""
-        d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            feature_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            memory_efficient=True  # Test with memory efficient mode
-        )
-        
-        # Get data for the first group
-        group_id = 0
-        group_data = d1_dataset._get_group_data(group_id)
-        
-        # Check that the returned data has the expected format
-        self.assertTrue(isinstance(group_data, pd.DataFrame))
-        self.assertTrue(self.time_col in group_data.columns)
-        for col in self.feature_cols:
-            self.assertTrue(col in group_data.columns)
-        for col in self.target_cols:
-            self.assertTrue(col in group_data.columns)
-        
-        # Test caching behavior
-        # First call should load from disk
-        d1_dataset.data_cache = {}  # Clear cache
-        group_data1 = d1_dataset._get_group_data(group_id)
-        
-        # Second call should use cache
-        group_data2 = d1_dataset._get_group_data(group_id)
-        
-        # Both should be the same data
-        pd.testing.assert_frame_equal(group_data1, group_data2)
+    # Check that the columns were correctly categorized
+    assert d1_dataset.known_cols == ['feature_0']
+    assert d1_dataset.unknown_cols == ['feature_1', 'target_0']
     
-    def test_len(self):
-        """Test __len__ method."""
-        d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            feature_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            memory_efficient=False
-        )
-        
-        # Check that the length is correct
-        # We should have 3 groups total (some in file 0, some in file 1)
-        self.assertEqual(len(d1_dataset), 3)
-    
-    def test_static_cols(self):
-        """Test specifying static columns."""
-        # Add a static column to the test data
-        for file_idx in range(2):
-            df = pd.read_csv(os.path.join(self.temp_dir, f'test_data_{file_idx}.csv'))
-            df['static_feature'] = df['group'].apply(lambda x: float(x.split('_')[1]) * 10)
-            df.to_csv(os.path.join(self.temp_dir, f'test_data_{file_idx}.csv'), index=False)
-        
-        # Create dataset with static column
-        static_cols = ['static_feature']
-        d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            feature_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            static_cols=static_cols,
-            memory_efficient=False
-        )
-        
-        # Check that static columns were set correctly
-        self.assertListEqual(d1_dataset.static_cols, static_cols)
-        
-        # Get data for the first group
-        group_data = d1_dataset[0]
-        
-        # Check that static features are included
-        self.assertTrue('st' in group_data)
-        self.assertEqual(len(group_data['st']), len(static_cols))
+    # Check metadata
+    metadata = d1_dataset.get_metadata()
+    assert metadata['known_cols'] == ['feature_0']
+    assert metadata['unknown_cols'] == ['feature_1', 'target_0']
 
 
-if __name__ == '__main__':
-    unittest.main()
+def test_get_group_data(test_data):
+    """Test _get_group_data method."""
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=test_data['file_paths'],
+        group_cols=test_data['group_cols'],
+        time_col=test_data['time_col'],
+        feature_cols=test_data['feature_cols'],
+        target_cols=test_data['target_cols'],
+        cat_cols=test_data['cat_cols'],
+        memory_efficient=True  # Test with memory efficient mode
+    )
+    
+    # Get data for the first group
+    group_id = 0
+    group_data = d1_dataset._get_group_data(group_id)
+    
+    # Check that the returned data has the expected format
+    assert isinstance(group_data, pd.DataFrame)
+    assert test_data['time_col'] in group_data.columns
+    for col in test_data['feature_cols']:
+        assert col in group_data.columns
+    for col in test_data['target_cols']:
+        assert col in group_data.columns
+    
+    # Test caching behavior
+    # First call should load from disk
+    d1_dataset.data_cache = {}  # Clear cache
+    group_data1 = d1_dataset._get_group_data(group_id)
+        
+    # Second call should use cache
+    group_data2 = d1_dataset._get_group_data(group_id)
+    
+    # Both should be identical
+    assert np.array_equal(group_data1.values, group_data2.values)
+
+
+def test_len(test_data):
+    """Test __len__ method."""
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=test_data['file_paths'],
+        group_cols=test_data['group_cols'],
+        time_col=test_data['time_col'],
+        feature_cols=test_data['feature_cols'],
+        target_cols=test_data['target_cols'],
+        cat_cols=test_data['cat_cols'],
+        memory_efficient=False
+    )
+    
+    # Check that the length is correct
+    # We should have 3 groups total (some in file 0, some in file 1)
+    assert len(d1_dataset) == 3
+
+
+def test_static_cols(test_data):
+    """Test handling of static columns."""
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=test_data['file_paths'],
+        group_cols=test_data['group_cols'],
+        time_col=test_data['time_col'],
+        feature_cols=test_data['feature_cols'],
+        target_cols=test_data['target_cols'],
+        cat_cols=test_data['cat_cols'],
+        static_cols=['static_feature'],
+        memory_efficient=False
+    )
+    
+    # Check that static columns were set correctly
+    assert d1_dataset.static_cols == ['static_feature']
+    
+    # Get data for the first group
+    group_data = d1_dataset[0]
+    
+    # Check that static features are included
+    assert 'st' in group_data
+    assert len(group_data['st']) == 1  # One static feature
+
+
+def test_data_caching(test_data):
+    """Test data caching behavior."""
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=test_data['file_paths'],
+        group_cols=test_data['group_cols'],
+        time_col=test_data['time_col'],
+        feature_cols=test_data['feature_cols'],
+        target_cols=test_data['target_cols'],
+        cat_cols=test_data['cat_cols'],
+        memory_efficient=False
+    )
+    
+    # First access should load data
+    group_data1 = d1_dataset[0]
+    
+    # Second access should use cache
+    group_data2 = d1_dataset[0]
+    
+    # Both should be identical
+    assert np.array_equal(group_data1['x'], group_data2['x'])
+    assert np.array_equal(group_data1['y'], group_data2['y'])
+    assert np.array_equal(group_data1['t'], group_data2['t'])
+    
+    # Test internal cache
+    d1_dataset.data_cache = {}  # Clear cache
+    group_data3 = d1_dataset._get_group_data(0)
+    group_data4 = d1_dataset._get_group_data(0)
+    assert np.array_equal(group_data3.values, group_data4.values)
+
+
+def test_extend_time_df():
+    """Test the extend_time_df function."""
+    # Create sample data with gaps
+    df = pd.DataFrame({
+        'time': [0, 2, 4],
+        'value': [1.0, 2.0, 3.0],
+        'group': ['A', 'A', 'A']
+    })
+    
+    # Extend the time series
+    extended_df = extend_time_df(
+        df=df,
+        time_col='time',
+        freq=1,
+        group_cols=['group']
+    )
+    
+    # Check that gaps were filled
+    assert len(extended_df) == 5  # Should now have rows for t=0,1,2,3,4
+    assert list(extended_df['time']) == [0, 1, 2, 3, 4]
+    assert np.isnan(extended_df.loc[1, 'value'])  # t=1 should be NaN
+    assert np.isnan(extended_df.loc[3, 'value'])  # t=3 should be NaN
