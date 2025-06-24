@@ -144,14 +144,30 @@ def test_getitem(test_data):
         memory_efficient=False
     )
     
-    # Get data for the first group
+    # Print dataset info
+    print(f"Dataset contains {len(d1_dataset)} groups")
+    
+    # Get and inspect first group
     group_data = d1_dataset[0]
     
-    # Check that the returned data has the expected format
-    assert 'x' in group_data
-    assert 'y' in group_data
-    assert 't' in group_data
-    assert 'group_id' in group_data
+    # Print structured group data
+    print("\nGroup data contents:")
+    for key, value in group_data.items():
+        if hasattr(value, 'shape'):
+            print(f"{key}: {type(value)} with shape {value.shape}")
+        else:
+            print(f"{key}: {type(value)} | {value}")
+    
+    # Verify expected structure
+    assert isinstance(group_data, dict), "Should return a dictionary"
+    assert 'x' in group_data, "Missing features (x)"
+    assert 'y' in group_data, "Missing targets (y)"
+    assert 't' in group_data, "Missing timestamps (t)"
+    assert 'group_id' in group_data, "Missing group identifier"
+    
+    # Verify shapes match
+    assert group_data['x'].shape[0] == group_data['y'].shape[0], "Feature/target length mismatch"
+    assert group_data['x'].shape[0] == len(group_data['t']), "Feature/time length mismatch"
     
     # Check dimensions
     assert group_data['x'].shape[1] == len(test_data['feature_cols'])
@@ -318,11 +334,12 @@ def test_extend_time_df():
     assert len(extended_df) == 5  # Should now have rows for t=0,1,2,3,4
     assert list(extended_df['time'].sort_values()) == [0, 1, 2, 3, 4]
     
-    # Merge with original data to check NaN values
-    merged_df = pd.merge(extended_df, df, on=['time', 'group'], how='left')
+    # Check that feature column exists in extended_df
+    assert 'feature' in extended_df.columns
+    
     # Check that rows for t=1 and t=3 have NaN for feature column
-    t1_row = merged_df[merged_df['time'] == 1]
-    t3_row = merged_df[merged_df['time'] == 3]
+    t1_row = extended_df[extended_df['time'] == 1]
+    t3_row = extended_df[extended_df['time'] == 3]
     assert len(t1_row) == 1
     assert len(t3_row) == 1
     assert pd.isna(t1_row['feature'].iloc[0])
