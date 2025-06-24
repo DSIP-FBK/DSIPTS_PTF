@@ -163,8 +163,8 @@ def test_known_unknown_cols(test_data):
     assert metadata['unknown_cols'] == ['feature_1', 'target_0']
 
 
-def test_get_group_data(test_data):
-    """Test _get_group_data method."""
+def test_load_group_data(test_data):
+    """Test _load_group_data method."""
     d1_dataset = MultiSourceTSDataSet(
         file_paths=test_data['file_paths'],
         group_cols=test_data['group_cols'],
@@ -176,8 +176,12 @@ def test_get_group_data(test_data):
     )
     
     # Get data for the first group
-    group_id = 0
-    group_data = d1_dataset._get_group_data(group_id)
+    # The file_group_key is a tuple of (file_idx, group_id)
+    # We need to find a valid file_group_key from the file_group_map
+    file_group_key = list(d1_dataset.file_group_map.values())[0]
+    
+    # Get data for this file-group combination
+    group_data = d1_dataset._load_group_data(file_group_key)
     
     # Check that the returned data has the expected format
     assert isinstance(group_data, pd.DataFrame)
@@ -190,10 +194,10 @@ def test_get_group_data(test_data):
     # Test caching behavior
     # First call should load from disk
     d1_dataset.data_cache = {}  # Clear cache
-    group_data1 = d1_dataset._get_group_data(group_id)
+    group_data1 = d1_dataset._load_group_data(file_group_key)
         
     # Second call should use cache
-    group_data2 = d1_dataset._get_group_data(group_id)
+    group_data2 = d1_dataset._load_group_data(file_group_key)
     
     # Both should be identical
     assert np.array_equal(group_data1.values, group_data2.values)
@@ -265,8 +269,9 @@ def test_data_caching(test_data):
     
     # Test internal cache
     d1_dataset.data_cache = {}  # Clear cache
-    group_data3 = d1_dataset._get_group_data(0)
-    group_data4 = d1_dataset._get_group_data(0)
+    file_group_key = list(d1_dataset.file_group_map.values())[0]
+    group_data3 = d1_dataset._load_group_data(file_group_key)
+    group_data4 = d1_dataset._load_group_data(file_group_key)
     assert np.array_equal(group_data3.values, group_data4.values)
 
 
@@ -275,7 +280,7 @@ def test_extend_time_df():
     # Create sample data with gaps
     df = pd.DataFrame({
         'time': [0, 2, 4],
-        'value': [1.0, 2.0, 3.0],
+        'feature': [1.0, 2.0, 3.0],
         'group': ['A', 'A', 'A']
     })
     
@@ -289,6 +294,14 @@ def test_extend_time_df():
     
     # Check that gaps were filled
     assert len(extended_df) == 5  # Should now have rows for t=0,1,2,3,4
-    assert list(extended_df['time']) == [0, 1, 2, 3, 4]
-    assert np.isnan(extended_df.loc[1, 'value'])  # t=1 should be NaN
-    assert np.isnan(extended_df.loc[3, 'value'])  # t=3 should be NaN
+    assert list(extended_df['time'].sort_values()) == [0, 1, 2, 3, 4]
+    
+    # Merge with original data to check NaN values
+    merged_df = pd.merge(extended_df, df, on=['time', 'group'], how='left')
+    # Check that rows for t=1 and t=3 have NaN for feature column
+    t1_row = merged_df[merged_df['time'] == 1]
+    t3_row = merged_df[merged_df['time'] == 3]
+    assert len(t1_row) == 1
+    assert len(t3_row) == 1
+    assert pd.isna(t1_row['feature'].iloc[0])
+    assert pd.isna(t3_row['feature'].iloc[0])

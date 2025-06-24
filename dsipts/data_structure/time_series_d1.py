@@ -28,22 +28,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-def _coerce_to_list(obj):
-    """
-    Coerce object to list.
-    
-    Args:
-        obj: Input object to be coerced to list
-        
-    Returns:
-        List containing the input object(s)
-    """
-    if obj is None:
-        return []
-    if isinstance(obj, str):
-        return [obj]
-    return list(obj)
-
 
 def extend_time_df(df, time_col, freq, group_cols=None, max_length=None, fill_value=None):
     """
