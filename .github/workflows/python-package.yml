@@ -49,6 +49,8 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Install dependencies
       run: |
+        # Create a virtual environment for uv
+        uv venv
         # Install PyTorch first to avoid conflicts
         uv pip install torch --index-url https://download.pytorch.org/whl/cpu
         # Install all dependencies from requirements.txt
