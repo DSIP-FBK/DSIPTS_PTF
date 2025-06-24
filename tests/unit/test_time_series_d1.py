@@ -39,8 +39,26 @@ def test_data():
                     data.append(row)
         
         # Create DataFrame and save to CSV
-        df = pd.DataFrame(data)
-        df.to_csv(os.path.join(temp_dir, f'test_data_{file_idx}.csv'), index=False)
+        if data:  # Only create file if there's data for this file
+            df = pd.DataFrame(data)
+            # Make sure to save the CSV with all columns
+            df.to_csv(os.path.join(temp_dir, f'test_data_{file_idx}.csv'), index=False)
+        else:
+            # Create an empty file with the correct columns to avoid issues
+            empty_df = pd.DataFrame(columns=[
+                'group', 'time', 'feature_0', 'feature_1', 'target_0', 
+                'cat_feature', 'static_feature'
+            ])
+            empty_df.to_csv(os.path.join(temp_dir, f'test_data_{file_idx}.csv'), index=False)
+    
+    # Verify the files were created correctly
+    for file_idx in range(2):
+        file_path = os.path.join(temp_dir, f'test_data_{file_idx}.csv')
+        df = pd.read_csv(file_path)
+        # Ensure all expected columns are present
+        assert 'feature_0' in df.columns
+        assert 'feature_1' in df.columns
+        assert 'target_0' in df.columns
     
     # Define common parameters
     params = {
@@ -122,6 +140,7 @@ def test_getitem(test_data):
         feature_cols=test_data['feature_cols'],
         target_cols=test_data['target_cols'],
         cat_cols=test_data['cat_cols'],
+        static_cols=test_data['static_cols'],
         memory_efficient=False
     )
     
@@ -172,13 +191,15 @@ def test_load_group_data(test_data):
         feature_cols=test_data['feature_cols'],
         target_cols=test_data['target_cols'],
         cat_cols=test_data['cat_cols'],
+        static_cols=test_data['static_cols'],
         memory_efficient=True  # Test with memory efficient mode
     )
     
     # Get data for the first group
     # The file_group_key is a tuple of (file_idx, group_id)
     # We need to find a valid file_group_key from the file_group_map
-    file_group_key = list(d1_dataset.file_group_map.values())[0]
+    # file_group_map is a list of tuples, not a dictionary
+    file_group_key = d1_dataset.file_group_map[0]
     
     # Get data for this file-group combination
     group_data = d1_dataset._load_group_data(file_group_key)
@@ -253,6 +274,7 @@ def test_data_caching(test_data):
         feature_cols=test_data['feature_cols'],
         target_cols=test_data['target_cols'],
         cat_cols=test_data['cat_cols'],
+        static_cols=test_data['static_cols'],
         memory_efficient=False
     )
     
@@ -269,7 +291,7 @@ def test_data_caching(test_data):
     
     # Test internal cache
     d1_dataset.data_cache = {}  # Clear cache
-    file_group_key = list(d1_dataset.file_group_map.values())[0]
+    file_group_key = d1_dataset.file_group_map[0]
     group_data3 = d1_dataset._load_group_data(file_group_key)
     group_data4 = d1_dataset._load_group_data(file_group_key)
     assert np.array_equal(group_data3.values, group_data4.values)
