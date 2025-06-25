@@ -2,6 +2,13 @@ from setuptools import find_packages, setup
 with open("requirements.txt") as f:
     requirements = f.read().splitlines()
 
+# Define documentation-specific dependencies
+docs_requires = [
+    "sphinx>=7.0.0",
+    "sphinx_pdj_theme>=0.4.0",
+    "sphinx_mdinclude>=0.5.0",
+]
+
 setup(
     name="dsipts",
     version="1.1.3",
@@ -11,6 +18,9 @@ setup(
     description="Python library for time series forecasting",
     setup_requires=[],
     install_requires=requirements,
+    extras_require={
+        "docs": docs_requires,
+    },
 )
 
 '''
