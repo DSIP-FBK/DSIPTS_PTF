@@ -8,9 +8,10 @@
 
 import sys
 import os
+import subprocess
 
 #installing sphinx_pdj_theme via pip
-!pip install sphinx_pdj_theme
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'sphinx_pdj_theme'])
 
 import sphinx_pdj_theme
 html_theme = 'sphinx_pdj_theme'
