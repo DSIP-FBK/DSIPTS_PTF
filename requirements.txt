@@ -1,5 +1,5 @@
 numpy>=1.24.0
-aim
+aim>=3.29.1
 torch>=2.0.0,<2.7.0
 scipy>=1.10.0
 pytorch-lightning==1.9.4
