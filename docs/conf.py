@@ -28,14 +28,27 @@ release = '1.1.1'
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
+# Try to install sphinx_mdinclude if it's not already installed
+try:
+    import sphinx_mdinclude
+except ImportError:
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'sphinx_mdinclude'])
+
+# Define extensions - conditionally include sphinx_mdinclude if available
 extensions = [
-   'sphinx.ext.autodoc',
+    'sphinx.ext.autodoc',
     'sphinx.ext.viewcode',
     'sphinx.ext.napoleon',
-    'sphinx_mdinclude',
     'sphinx.ext.mathjax'
-    
 ]
+
+# Try to add sphinx_mdinclude if available
+try:
+    import sphinx_mdinclude
+    extensions.append('sphinx_mdinclude')
+except ImportError:
+    print("WARNING: sphinx_mdinclude not available. Some markdown files may not render correctly.")
+
 mathjax_path = "https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"
 
 templates_path = ['_templates']
