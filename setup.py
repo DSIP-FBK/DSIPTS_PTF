@@ -5,7 +5,6 @@ with open("requirements.txt") as f:
 # Define documentation-specific dependencies
 docs_requires = [
     "sphinx>=7.0.0",
-    "sphinx_rtd_theme>=1.0.0",
     "sphinx_pdj_theme>=0.4.0",
     "sphinx_mdinclude>=0.5.0",
 ]
