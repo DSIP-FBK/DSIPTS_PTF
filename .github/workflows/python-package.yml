@@ -2,9 +2,12 @@ name: Python Package
 
 on:
   push:
-    branches: [ '*' ]
+    branches:
+      - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: [ main ]
+    branches: 
+      - main
+      - master  # Include master branch as well
 
 jobs:
   # lint:
