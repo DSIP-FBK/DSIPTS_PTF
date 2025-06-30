@@ -10,3 +10,4 @@ multirun
 tmp
 *.db
 dist*
+/.venv
