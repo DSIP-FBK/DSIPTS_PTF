@@ -67,7 +67,6 @@ jobs:
         # Use the Python from the virtual environment
         source .venv/bin/activate
         python -m pytest tests/ --cov=dsipts --cov-report=xml
-
   docs:
     needs: test
     runs-on: ubuntu-latest
@@ -91,7 +90,6 @@ jobs:
       run: |
         cd docs
         make html
-
   build:
     needs: [test, docs]
     runs-on: ubuntu-latest
