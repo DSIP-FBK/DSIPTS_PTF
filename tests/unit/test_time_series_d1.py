@@ -1,13 +1,11 @@
 import os
-import sys
 import pandas as pd
 import numpy as np
 import tempfile
 import shutil
 import pytest
 
-# Add the parent directory to the path so we can import the module
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+# Import directly from the package
 from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet, extend_time_df
 
 
