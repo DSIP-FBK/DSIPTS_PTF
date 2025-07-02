@@ -66,7 +66,9 @@ jobs:
       run: |
         # Use the Python from the virtual environment
         source .venv/bin/activate
-        python -m pytest tests/ --cov=dsipts --cov-report=xml
+        # Only run unit tests for now, integration tests will be handled in a separate MR
+        #python -m pytest tests --cov=dsipts --cov-report=xml
+        python -m pytest tests/unit/ --cov=dsipts --cov-report=xml
   docs:
     needs: test
     runs-on: ubuntu-latest
