@@ -16,7 +16,7 @@ Key Features:
 
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import pytorch_lightning as pl
 import pandas as pd
 import numpy as np

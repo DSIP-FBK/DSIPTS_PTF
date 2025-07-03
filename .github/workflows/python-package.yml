@@ -1,0 +1,128 @@
+name: Python Package
+
+on:
+  push:
+    branches: [ '*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # lint:
+  #   # Ruff checks are commented out for now. Uncomment to restore linting/formatting checks.
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - uses: actions/checkout@v3
+  #   - name: Set up Python
+  #     uses: actions/setup-python@v4
+  #     with:
+  #       python-version: '3.10'
+  #   - name: Install dependencies
+  #     run: |
+  #       python -m pip install --upgrade pip
+  #       pip install ruff
+  #   - name: Run Ruff
+  #     run: |
+  #       ruff check .
+  #       ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12']
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - name: Install dependencies
+      run: |
+        # Create a virtual environment for uv
+        uv venv
+        # Install PyTorch first to avoid conflicts
+        uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+        # Install all dependencies from requirements.txt
+        uv pip install -r requirements.txt
+        # Install package in development mode
+        uv pip install -e .
+        # Explicitly install pytest and pytest-cov in the virtual environment
+        uv pip install pytest pytest-cov
+    - name: Run tests
+      run: |
+        # Use the Python from the virtual environment
+        source .venv/bin/activate
+        python -m pytest tests/ --cov=dsipts --cov-report=xml
+  docs:
+    needs: test
+    runs-on: ubuntu-latest
+    # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # Allow only one concurrent deployment
+    concurrency:
+      group: "pages"
+      cancel-in-progress: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # Install package with docs extras
+        pip install -e ".[docs]"
+        # Explicitly install Sphinx and required extensions
+        pip install sphinx>=7.0.0
+        pip install sphinx_pdj_theme>=0.4.0
+        # Install sphinx_mdinclude directly from GitHub to ensure compatibility
+        pip install git+https://github.com/omnilib/sphinx-mdinclude.git
+    - name: Build documentation
+      run: |
+        cd docs
+        make html
+    - name: Setup Pages
+      uses: actions/configure-pages@v5
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: 'docs/_build/html'
+    - name: Deploy to GitHub Pages
+      id: deployment
+      #'refs/heads/main'
+      if: github.ref == 'refs/heads/enh/doc_deployments' 
+      uses: actions/deploy-pages@v4
+  build:
+    needs: [test, docs]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine setuptools wheel
+    - name: Build package
+      run: |
+        # Build the package directly without relying on requirements.txt
+        python -m build
+    - name: Check package
+      run: twine check dist/*
