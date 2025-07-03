@@ -10,3 +10,6 @@ multirun
 tmp
 *.db
 dist*
+/.venv
+/docs/_build
+/dsipts.egg-info
