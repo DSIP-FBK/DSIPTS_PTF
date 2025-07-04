@@ -96,12 +96,17 @@ jobs:
       run: |
         cd docs
         make html
+        # Debug - check if the build was successful
+        echo "Checking if HTML files were generated:"
+        ls -la _build/html/
+        echo "Does index.html exist?"
+        test -f _build/html/index.html && echo "Yes" || echo "No"
     - name: Setup Pages
       uses: actions/configure-pages@v5
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
-        path: 'docs/_build/html'
+        path: './docs/_build/html'
     - name: Deploy to GitHub Pages
       id: deployment
       #'refs/heads/main'
