@@ -1,10 +1,10 @@
 from setuptools import find_packages, setup
+import os
 
-# Define all requirements directly in setup.py
-# This avoids dependency on external files like requirements.txt
-requirements = [
+# Define core requirements - only what's needed for the package to function
+core_requirements = [
     "numpy>=1.24.0",
-    "aim",
+    "aim>=3.29.1",
     "torch>=2.0.0,<2.7.0",
     "scipy>=1.10.0",
     "pytorch-lightning==1.9.4",
@@ -22,10 +22,10 @@ requirements = [
     "requests>=2.28.0",
     "starlette>=0.30.0,<0.47.0",
     "pydantic>=1.10.0,<3.0.0",
+    "plotly>=5.14.0",
     "beautifulsoup4==4.13.4",
     "html5lib>=1.1",
     "html-table-parser-python3==0.3.1",
-    "plotly>=5.14.0",
 ]
 
 # Define documentation-specific dependencies
@@ -33,7 +33,21 @@ docs_requires = [
     "sphinx>=7.0.0",
     "sphinx_pdj_theme>=0.4.0",
     "sphinx_mdinclude>=0.5.0",
+    "sphinx_rtd_theme>=1.0.0",
 ]
+
+# Define test-specific dependencies
+test_requires = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+# Define dev-specific dependencies (combines docs and test requirements)
+dev_requires = docs_requires + test_requires
+
+# Use core_requirements directly instead of reading from requirements.txt
+# This avoids issues during build when requirements.txt might not be available
+requirements = core_requirements
 
 setup(
     name="dsipts",
@@ -46,6 +60,8 @@ setup(
     install_requires=requirements,
     extras_require={
         "docs": docs_requires,
+        "test": test_requires,
+        "dev": dev_requires,
     },
 )
 
