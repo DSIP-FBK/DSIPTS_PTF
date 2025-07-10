@@ -5,28 +5,42 @@ on:
     branches:
       - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: 
+    branches:
       - main
       - master  # Include master branch as well
 
 jobs:
-  # lint:
-  #   # Ruff checks are commented out for now. Uncomment to restore linting/formatting checks.
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #   - uses: actions/checkout@v3
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v4
-  #     with:
-  #       python-version: '3.10'
-  #   - name: Install dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       pip install ruff
-  #   - name: Run Ruff
-  #     run: |
-  #       ruff check .
-  #       ruff format --check .
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff
+    - name: Run Ruff on changed files
+      run: |
+        # Get the list of changed Python files
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          # For pull requests, compare with the base branch
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | grep -E '\.py$' | tr '\n' ' ')
+        else
+          # For pushes, compare with the previous commit
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT HEAD^ HEAD | grep -E '\.py$' | tr '\n' ' ')
+        fi
+
+        # Only run if there are changed Python files
+        if [ -n "$CHANGED_FILES" ]; then
+          echo "Checking files: $CHANGED_FILES"
+          ruff check $CHANGED_FILES
+          ruff format --check $CHANGED_FILES
+        else
+          echo "No Python files changed. Skipping Ruff."
+        fi
 
   test:
     runs-on: ubuntu-latest
