@@ -1,0 +1,79 @@
+name: Build and Publish Package
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - name: Install dependencies
+      run: |
+        # Create a virtual environment for uv
+        uv venv
+        # Install build tools
+        uv pip install build twine setuptools wheel
+    - name: Build package
+      run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
+        # Build the package using pyproject.toml
+        python -m build
+    - name: Check package
+      run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
+        twine check dist/*
+    - name: Store built package
+      uses: actions/upload-artifact@v3
+      with:
+        name: dist
+        path: dist/
+        retention-days: 7
+
+  publish:
+    needs: build
+    # Only run on release
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - name: Install dependencies
+      run: |
+        # Create a virtual environment for uv
+        uv venv
+        # Install twine
+        uv pip install twine
+    - name: Download built package
+      uses: actions/download-artifact@v3
+      with:
+        name: dist
+        path: dist/
+    - name: Publish to PyPI
+      run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
+        # Use twine to upload to PyPI
+        twine upload dist/* --username __token__ --password ${{ secrets.PYPI_API_TOKEN }} --skip-existing
