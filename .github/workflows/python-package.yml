@@ -104,6 +104,8 @@ jobs:
       run: |
         # Create a virtual environment for uv
         uv venv
+        # Install pip inside the virtual environment
+        uv pip install pip
         # Install package with docs extras
         uv pip install -e ".[docs]"
         # Explicitly install Sphinx and required extensions

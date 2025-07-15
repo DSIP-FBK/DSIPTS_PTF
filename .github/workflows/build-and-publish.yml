@@ -25,6 +25,8 @@ jobs:
       run: |
         # Create a virtual environment for uv
         uv venv
+        # Install pip inside the virtual environment
+        uv pip install pip
         # Install build tools
         uv pip install build twine setuptools wheel
     - name: Build package
@@ -64,6 +66,8 @@ jobs:
       run: |
         # Create a virtual environment for uv
         uv venv
+        # Install pip inside the virtual environment
+        uv pip install pip
         # Install twine
         uv pip install twine
     - name: Download built package
