@@ -1,25 +1,108 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsipts"
-dynamic = ["version"]
+version = "1.1.3"
+authors = [
+    {name = "Andrea Gobbi", email = "agobbi@fbk.eu"},
+]
+description = "Python library for time series forecasting"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["time series", "forecasting", "deep learning", "pytorch", "machine learning"]
+
+# Core dependencies - only what's needed for the package to function
+dependencies = [
+    "numpy>=1.24.0",
+    "torch>=2.0.0,<2.7.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+    "scikit-learn>=1.2.0",
+    "omegaconf>=2.3.0",
+    "einops>=0.6.0",
+    "matplotlib>=3.7.0",
+    "requests>=2.28.0",
+    "pydantic>=1.10.0,<3.0.0",
+    "plotly>=5.14.0",
+    "beautifulsoup4==4.13.4",
+    "html5lib>=1.1",
+    "pytorch-lightning==1.9.4",
+    "torchmetrics>=0.11.0",
+    "lightning_utilities>=0.8.0",
+    "aim>=3.29.1",
+    "numba>=0.57.0",
+]
 
 [project.optional-dependencies]
+# Additional deep learning and optimization dependencies
+deep = [
+    # Currently empty as core dependencies cover basic needs
+]
+
+# Hyperparameter optimization and experiment tracking
+optim = [
+    "hydra-core>=1.3.2",
+    "hydra-joblib-launcher>=1.2.0",
+    "hydra-optuna-sweeper>=1.2.0",
+]
+
+# Web and API dependencies
+web = [
+    "starlette>=0.30.0,<0.47.0",
+    "html-table-parser-python3==0.3.1",
+]
+
+# Testing dependencies
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
 ]
+
+# Documentation dependencies
 docs = [
     "sphinx>=7.0.0",
-    "sphinx-rtd-theme>=1.0.0",
+    "sphinx_pdj_theme>=0.4.0",
+    "sphinx_mdinclude>=0.5.0",
+    "sphinx_rtd_theme>=1.0.0",
 ]
+
+# Development dependencies (combines all optional dependencies)
+dev = [
+    "dsipts[deep,optim,web,test,docs]",
+]
+
+# Complete installation with all features
+all = [
+    "dsipts[deep,optim,web]",
+]
+
+[project.urls]
+Homepage = "https://github.com/DSIP-FBK/DSIPTS_PTF"
+Repository = "https://github.com/DSIP-FBK/DSIPTS_PTF"
+Documentation = "https://github.com/DSIP-FBK/DSIPTS_PTF"
+"Bug Tracker" = "https://github.com/DSIP-FBK/DSIPTS_PTF/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*"]
 
 [tool.ruff]
 select = ["E", "F", "I"]
 ignore = []
 line-length = 100
+target-version = "py38"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -35,3 +118,37 @@ markers = [
     "unit: marks tests as unit tests",
     "integration: marks tests as integration tests",
 ]
+addopts = "-v --tb=short"
+minversion = "7.0"
+
+[tool.coverage.run]
+source = ["dsipts"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "setup.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
