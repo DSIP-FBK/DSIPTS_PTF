@@ -26,6 +26,9 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Install dependencies
       run: |
+        # Create a virtual environment for uv
+        uv venv
+        # Install pre-commit
         uv pip install pre-commit
     - name: Get changed files
       id: changed-files
@@ -41,6 +44,8 @@ jobs:
         echo "CHANGED_FILES=$CHANGED_FILES" >> $GITHUB_ENV
     - name: Run pre-commit on changed files
       run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
         if [ -n "$CHANGED_FILES" ]; then
           echo "Checking files: $CHANGED_FILES"
           pre-commit run --color always --files $CHANGED_FILES --show-diff-on-failure
