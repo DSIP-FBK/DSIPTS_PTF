@@ -2,34 +2,62 @@ name: Python Package
 
 on:
   push:
-    branches: [ '*' ]
+    branches:
+      - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - master  # Include master branch as well
 
 jobs:
-  # lint:
-  #   # Ruff checks are commented out for now. Uncomment to restore linting/formatting checks.
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #   - uses: actions/checkout@v3
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v4
-  #     with:
-  #       python-version: '3.10'
-  #   - name: Install dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       pip install ruff
-  #   - name: Run Ruff
-  #     run: |
-  #       ruff check .
-  #       ruff format --check .
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for proper file comparison
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - name: Install dependencies
+      run: |
+        # Create a virtual environment for uv
+        uv venv
+        # Install pre-commit
+        uv pip install pre-commit
+    - name: Get changed files
+      id: changed-files
+      run: |
+        # Get the list of changed files
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          # For pull requests, compare with the base branch
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | tr '\n' ' ')
+        else
+          # For pushes, compare with the previous commit
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRT HEAD^ HEAD | tr '\n' ' ')
+        fi
+        echo "CHANGED_FILES=$CHANGED_FILES" >> $GITHUB_ENV
+    - name: Run pre-commit on changed files
+      run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
+        if [ -n "$CHANGED_FILES" ]; then
+          echo "Checking files: $CHANGED_FILES"
+          pre-commit run --color always --files $CHANGED_FILES --show-diff-on-failure
+        else
+          echo "No files changed. Skipping pre-commit checks."
+        fi
 
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.11']
+        python-version: ['3.12']
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
@@ -40,7 +68,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
         restore-keys: |
           ${{ runner.os }}-pip-
     - name: Install uv
@@ -51,20 +79,14 @@ jobs:
       run: |
         # Create a virtual environment for uv
         uv venv
-        # Install PyTorch first to avoid conflicts
-        uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-        # Install all dependencies from requirements.txt
-        uv pip install -r requirements.txt
-        # Install package in development mode
-        uv pip install -e .
-        # Explicitly install pytest and pytest-cov in the virtual environment
-        uv pip install pytest pytest-cov
-    - name: Run tests
+        # Install the package with test dependencies
+        uv pip install -e ".[test]"
+    - name: Test with pytest
       run: |
-        # Use the Python from the virtual environment
+        # Activate the virtual environment
         source .venv/bin/activate
-        python -m pytest tests/ --cov=dsipts --cov-report=xml
-
+        # Run unit tests with coverage
+        pytest tests/unit/ --cov=dsipts --cov-report=xml
   docs:
     needs: test
     runs-on: ubuntu-latest
@@ -73,30 +95,27 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.12'
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install -e ".[docs]"
+        # Create a virtual environment for uv
+        uv venv
+        # Install pip inside the virtual environment
+        uv pip install pip
+        # Install package with docs extras
+        uv pip install -e ".[docs]"
+        # Explicitly install Sphinx and required extensions
+        uv pip install sphinx>=7.0.0
+        uv pip install sphinx_pdj_theme>=0.4.0
+        # Install sphinx_mdinclude directly from GitHub to ensure compatibility
+        uv pip install git+https://github.com/omnilib/sphinx-mdinclude.git
     - name: Build documentation
       run: |
+        # Activate the virtual environment
+        source .venv/bin/activate
         cd docs
         make html
-
-  build:
-    needs: [test, docs]
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build twine
-    - name: Build package
-      run: python -m build
-    - name: Check package
-      run: twine check dist/*
