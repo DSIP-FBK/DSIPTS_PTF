@@ -1,7 +1,8 @@
 """
 Time Series D2 Layer Module
 This module provides the D2 layer for time series data processing:
-- TSDataModule: LightningDataModule for time series data with support for training, validation, and testing
+- TSDataModule: LightningDataModule for time series data with support for
+  training, validation, and testing
 - TimeSeriesSubset: Subset implementation for train/val/test splits
 - custom_collate_fn: Custom collate function for handling mixed data types
 Key Features:
@@ -12,28 +13,28 @@ Key Features:
 - Efficiently manages memory with caching mechanisms
 """
 
-import random
-import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
-import pytorch_lightning as pl
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union, Tuple
 import logging
+import random
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+import pytorch_lightning as pl
+import torch
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 # Import the D1 layer
 from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 
 class TSDataModule(pl.LightningDataModule):
     """D2 Layer - Processes time series data for model consumption.
-    
+
     This module:
     1. Creates sliding windows from time series data
     2. Handles train/validation/test splits
@@ -47,18 +48,18 @@ class TSDataModule(pl.LightningDataModule):
         future_len: int,
         batch_size: int = 32,
         min_valid_length: Optional[int] = None,
-        split_method: str = 'percentage',
+        split_method: str = "percentage",
         split_config: Optional[tuple] = None,
         num_workers: int = 0,
         sampler: Optional[Sampler] = None,
         memory_efficient: bool = False,
         known_cols: Optional[List[str]] = None,
         unknown_cols: Optional[List[str]] = None,
-        precompute: bool = True
+        precompute: bool = True,
     ):
         """
         Initialize the TSDataModule.
-        
+
         Args:
             d1_dataset: The D1 dataset instance (MultiSourceTSDataSet)
             past_len: Number of past time steps for input
@@ -70,8 +71,10 @@ class TSDataModule(pl.LightningDataModule):
             num_workers: Number of workers for DataLoader
             sampler: Optional custom sampler for the DataLoader
             memory_efficient: Whether to use memory-efficient mode
-            known_cols: Columns that are known at prediction time (overrides D1 dataset settings)
-            unknown_cols: Columns that are unknown at prediction time (overrides D1 dataset settings)
+            known_cols: Columns that are known at prediction time (overrides D1 dataset
+                settings)
+            unknown_cols: Columns that are unknown at prediction time (overrides D1
+                dataset settings)
             precompute: Whether to precompute valid indices and create datasets
         """
         super().__init__()
@@ -99,12 +102,12 @@ class TSDataModule(pl.LightningDataModule):
         self.unknown_cols = unknown_cols if unknown_cols is not None else d1_dataset.unknown_cols
 
         # Update metadata with known/unknown columns
-        self.metadata['known_cols'] = self.known_cols
-        self.metadata['unknown_cols'] = self.unknown_cols
+        self.metadata["known_cols"] = self.known_cols
+        self.metadata["unknown_cols"] = self.unknown_cols
 
         # Default split configuration based on method
         if split_config is None:
-            if split_method == 'percentage':
+            if split_method == "percentage":
                 self.split_config = (0.7, 0.15, 0.15)  # Default: 70% train, 15% val, 15% test
             else:
                 raise ValueError("For 'group' split method, split_config must be provided")
@@ -131,13 +134,20 @@ class TSDataModule(pl.LightningDataModule):
         self.length = len(self.mapping)
 
         # Create splits if not already done
-        if not hasattr(self, 'train_indices') or not self.train_indices:
+        if not hasattr(self, "train_indices") or not self.train_indices:
             if self.split_config is not None:
                 print(f"Creating {self.split_method} splits with config: {self.split_config}")
 
                 # Create splits with the new config
-                self.train_indices, self.val_indices, self.test_indices = self._create_splits(self.split_config)
-                print(f"Split statistics: Train: {len(self.train_indices)}, Validation: {len(self.val_indices)}, Test: {len(self.test_indices)}")
+                self.train_indices, self.val_indices, self.test_indices = self._create_splits(
+                    self.split_config
+                )
+                print(
+                    f"Split statistics:"
+                    f"Train: {len(self.train_indices)}, "
+                    f"Validation: {len(self.val_indices)}, "
+                    f"Test: {len(self.test_indices)}"
+                )
             else:
                 # Default to all indices as training
                 self.train_indices = list(range(self.length))
@@ -148,11 +158,11 @@ class TSDataModule(pl.LightningDataModule):
         # Otherwise, the datasets will be created on-demand during setup
         if self.precompute:
             print("Precomputing datasets for train/val/test splits...")
-            if hasattr(self, 'train_indices') and self.train_indices:
+            if hasattr(self, "train_indices") and self.train_indices:
                 self.train_dataset = TimeSeriesSubset(self, self.train_indices)
-            if hasattr(self, 'val_indices') and self.val_indices:
+            if hasattr(self, "val_indices") and self.val_indices:
                 self.val_dataset = TimeSeriesSubset(self, self.val_indices)
-            if hasattr(self, 'test_indices') and self.test_indices:
+            if hasattr(self, "test_indices") and self.test_indices:
                 self.test_dataset = TimeSeriesSubset(self, self.test_indices)
         else:
             print("Datasets will be created on-demand during setup...")
@@ -160,29 +170,27 @@ class TSDataModule(pl.LightningDataModule):
     def _compute_valid_indices(self):
         """
         Compute valid indices for all groups in the dataset.
-        
+
         This method ensures that windows are valid based on:
         1. Having enough valid points in the past window
         2. Having at least one valid point in the future window
-        
+
         Optimizations:
         - Vectorized operations for NaN checks
         - Early termination for invalid regions
         - Efficient masking for bulk validation
-        
+
         Returns:
             Dictionary mapping group indices to lists of valid indices
         """
-        valid_indices = {} 
-        device = torch.device('cpu')  # Use CPU for consistency across environments
-
+        valid_indices = {}
         for i in range(len(self.d1_dataset)):
             # Load group data from D1 dataset
             group_data = self.d1_dataset[i]
 
             # Fetch feature and target tensors
-            features = group_data.get('x', torch.tensor([]))
-            targets = group_data.get('y', torch.tensor([]))
+            features = group_data.get("x", torch.tensor([]))
+            targets = group_data.get("y", torch.tensor([]))
 
             # Get the time series length
             ts_length = len(features)
@@ -196,8 +204,16 @@ class TSDataModule(pl.LightningDataModule):
             all_indices = list(range(ts_length - (self.past_len + self.future_len) + 1))
 
             # Create validity masks for features and targets
-            feature_is_valid = ~torch.isnan(features) if features.numel() > 0 else torch.ones((ts_length, 1), dtype=torch.bool)
-            target_is_valid = ~torch.isnan(targets) if targets.numel() > 0 else torch.ones((ts_length, 1), dtype=torch.bool)
+            feature_is_valid = (
+                ~torch.isnan(features)
+                if features.numel() > 0
+                else torch.ones((ts_length, 1), dtype=torch.bool)
+            )
+            target_is_valid = (
+                ~torch.isnan(targets)
+                if targets.numel() > 0
+                else torch.ones((ts_length, 1), dtype=torch.bool)
+            )
 
             # If features or targets are multi-dimensional, check if any dimension has NaN
             if feature_is_valid.dim() > 1:
@@ -261,9 +277,9 @@ class TSDataModule(pl.LightningDataModule):
     def _create_global_mapping(self):
         """
         Create a global mapping from index to (group_idx, local_idx).
-        
+
         This allows O(1) lookup of samples by global index.
-        
+
         Returns:
             List of (group_idx, local_idx) tuples
         """
@@ -286,14 +302,14 @@ class TSDataModule(pl.LightningDataModule):
     def _get_group_data(self, group_idx):
         """
         Get data for a specific group, using cache if available.
-        
+
         This method:
         1. Checks if the group data is already in the cache
         2. If not, loads it from the D1 dataset
-        
+
         Args:
             group_idx: Index of the group to retrieve
-            
+
         Returns:
             Dictionary containing the group data
         """
@@ -308,32 +324,40 @@ class TSDataModule(pl.LightningDataModule):
         This is useful for model architecture decisions.
         """
         # Copy max classes information from D1 dataset metadata
-        if 'max_classes' in self.d1_dataset.metadata:
-            self.metadata['max_classes'] = self.d1_dataset.metadata['max_classes'].copy()
+        if "max_classes" in self.d1_dataset.metadata:
+            self.metadata["max_classes"] = self.d1_dataset.metadata["max_classes"].copy()
 
         # Ensure known/unknown column categorization is properly reflected in metadata
-        self.metadata['known_cols'] = self.known_cols
-        self.metadata['unknown_cols'] = self.unknown_cols
+        self.metadata["known_cols"] = self.known_cols
+        self.metadata["unknown_cols"] = self.unknown_cols
 
         # Add categorical/numerical classification for known/unknown columns
-        self.metadata['known_cat_cols'] = [col for col in self.known_cols if col in self.d1_dataset.cat_cols]
-        self.metadata['known_num_cols'] = [col for col in self.known_cols if col not in self.d1_dataset.cat_cols]
-        self.metadata['unknown_cat_cols'] = [col for col in self.unknown_cols if col in self.d1_dataset.cat_cols]
-        self.metadata['unknown_num_cols'] = [col for col in self.unknown_cols if col not in self.d1_dataset.cat_cols]
+        self.metadata["known_cat_cols"] = [
+            col for col in self.known_cols if col in self.d1_dataset.cat_cols
+        ]
+        self.metadata["known_num_cols"] = [
+            col for col in self.known_cols if col not in self.d1_dataset.cat_cols
+        ]
+        self.metadata["unknown_cat_cols"] = [
+            col for col in self.unknown_cols if col in self.d1_dataset.cat_cols
+        ]
+        self.metadata["unknown_num_cols"] = [
+            col for col in self.unknown_cols if col not in self.d1_dataset.cat_cols
+        ]
 
     def _create_splits(self, split_config):
         """
         Create train/validation/test splits based on the specified configuration.
-        
+
         Args:
             split_config: Configuration for splits:
                           - For 'percentage' method: (train%, val%, test%)
                           - For 'group' method: (train_groups, val_groups, test_groups)
-                          
+
         Returns:
             Tuple of (train_indices, val_indices, test_indices)
         """
-        if self.split_method == 'percentage':
+        if self.split_method == "percentage":
             # Percentage-based split (temporal or random)
             train_pct, val_pct, test_pct = split_config
             total_samples = len(self.mapping)
@@ -348,7 +372,8 @@ class TSDataModule(pl.LightningDataModule):
             # Calculate number of samples for each split
             train_size = int(total_samples * train_pct)
             val_size = int(total_samples * val_pct)
-            test_size = total_samples - train_size - val_size
+            # remaining samples for test split
+            _ = total_samples - train_size - val_size
 
             # For temporal splits, sort by time
             all_indices = list(range(total_samples))
@@ -361,7 +386,7 @@ class TSDataModule(pl.LightningDataModule):
                     group_idx, local_idx = self.mapping[idx]
                     group_data = self.d1_dataset[group_idx]
                     # Use the first time point of each window
-                    time_point = group_data['t'][local_idx]
+                    time_point = group_data["t"][local_idx]
                     # Convert to numeric value for sorting
                     if isinstance(time_point, (str, np.datetime64)):
                         # Convert to timestamp (seconds since epoch)
@@ -375,22 +400,34 @@ class TSDataModule(pl.LightningDataModule):
 
                 # Split into train/val/test
                 train_indices = sorted_indices[:train_size]
-                val_indices = sorted_indices[train_size:train_size + val_size]
-                test_indices = sorted_indices[train_size + val_size:]
+                val_indices = sorted_indices[train_size : train_size + val_size]
+                test_indices = sorted_indices[train_size + val_size :]
 
-                print(f"Temporal percentage-based split - Train: {len(train_indices)}, Val: {len(val_indices)}, Test: {len(test_indices)} samples")
+                print(
+                    (
+                        "Temporal percentage-based split - Train: "
+                        f"{len(train_indices)}, Val: {len(val_indices)}, "
+                        f"Test: {len(test_indices)} samples"
+                    )
+                )
 
             except (TypeError, ValueError) as e:
                 # Fallback to random split if time-based sorting fails
                 print(f"Warning: Could not sort by time ({str(e)}), using random split instead")
                 random.shuffle(all_indices)
                 train_indices = all_indices[:train_size]
-                val_indices = all_indices[train_size:train_size + val_size]
-                test_indices = all_indices[train_size + val_size:]
+                val_indices = all_indices[train_size : train_size + val_size]
+                test_indices = all_indices[train_size + val_size :]
 
-                print(f"Random percentage-based split - Train: {len(train_indices)}, Val: {len(val_indices)}, Test: {len(test_indices)} samples")
+                print(
+                    (
+                        "Random percentage-based split - Train: "
+                        f"{len(train_indices)}, Val: {len(val_indices)}, "
+                        f"Test: {len(test_indices)} samples"
+                    )
+                )
 
-        elif self.split_method == 'group':
+        elif self.split_method == "group":
             # Group-based split
             train_groups, val_groups, test_groups = split_config
 
@@ -405,7 +442,7 @@ class TSDataModule(pl.LightningDataModule):
             test_indices = []
 
             for idx, (group_idx, _) in enumerate(self.mapping):
-                group_id = self.d1_dataset[group_idx]['group_id']
+                group_id = self.d1_dataset[group_idx]["group_id"]
 
                 if group_id in train_groups_set:
                     train_indices.append(idx)
@@ -417,9 +454,12 @@ class TSDataModule(pl.LightningDataModule):
                     # Default to train if not specified
                     train_indices.append(idx)
 
-            print(f"Group-based split - Train: {len(train_indices)} (from {len(train_groups)} groups), "
-                  f"Val: {len(val_indices)} (from {len(val_groups)} groups), "
-                  f"Test: {len(test_indices)} (from {len(test_groups)} groups) samples")
+            print(
+                f"Group-based split -"
+                f"Train: {len(train_indices)} (from {len(train_groups)} groups),"
+                f"Val: {len(val_indices)} (from {len(val_groups)} groups),"
+                f"Test: {len(test_indices)} (from {len(test_groups)} groups) samples"
+            )
 
         else:
             raise ValueError(f"Unknown split method: {self.split_method}")
@@ -440,15 +480,15 @@ class TSDataModule(pl.LightningDataModule):
     def __getitem__(self, idx):
         """
         Get a time series window by global index.
-        
+
         This method:
         1. Maps the global index to a specific group and local index
         2. Extracts the window from the group data
         3. Returns the window in a format suitable for model training
-        
+
         Args:
             idx: Global index of the window to retrieve
-            
+
         Returns:
             Dictionary containing:
             - past_features: Tensor of past features
@@ -470,45 +510,52 @@ class TSDataModule(pl.LightningDataModule):
         future_end_idx = past_end_idx + self.future_len
 
         # Extract past and future windows
-        past_features = group_data['x'][start_idx:past_end_idx]
-        past_time = group_data['t'][start_idx:past_end_idx]
-        future_targets = group_data['y'][past_end_idx:future_end_idx]
-        future_time = group_data['t'][past_end_idx:future_end_idx]
+        past_features = group_data["x"][start_idx:past_end_idx]
+        past_time = group_data["t"][start_idx:past_end_idx]
+        future_targets = group_data["y"][past_end_idx:future_end_idx]
+        future_time = group_data["t"][past_end_idx:future_end_idx]
 
         # Get static features
-        static = group_data.get('st', torch.tensor([]))
+        static = group_data.get("st", torch.tensor([]))
 
         # Return the window as a dictionary
         return {
-            'past_features': past_features,
-            'past_time': past_time,
-            'future_targets': future_targets,
-            'future_time': future_time,
-            'group_id': group_data['group_id'],
-            'static': static
+            "past_features": past_features,
+            "past_time": past_time,
+            "future_targets": future_targets,
+            "future_time": future_time,
+            "group_id": group_data["group_id"],
+            "static": static,
         }
 
     def setup(self, stage=None):
         """
         Prepare data for the given stage.
-        
+
         Args:
             stage: Either 'fit' or 'test'
         """
         # If we haven't precomputed valid indices yet, do it now
-        if not hasattr(self, 'valid_indices') or self.valid_indices is None:
+        if not hasattr(self, "valid_indices") or self.valid_indices is None:
             print("Computing valid indices...")
             self.valid_indices = self._compute_valid_indices()
             self.mapping = self._create_global_mapping()
             self.length = len(self.mapping)
 
         # Create splits if not already done
-        if not hasattr(self, 'train_indices') or not self.train_indices:
+        if not hasattr(self, "train_indices") or not self.train_indices:
             if self.split_config is not None:
                 print(f"Creating {self.split_method} splits with config: {self.split_config}")
                 # Create splits with the new config
-                self.train_indices, self.val_indices, self.test_indices = self._create_splits(self.split_config)
-                print(f"Split statistics: Train: {len(self.train_indices)}, Validation: {len(self.val_indices)}, Test: {len(self.test_indices)}")
+                self.train_indices, self.val_indices, self.test_indices = self._create_splits(
+                    self.split_config
+                )
+                print(
+                    f"Split statistics:"
+                    f"Train: {len(self.train_indices)}, "
+                    f"Validation: {len(self.val_indices)}, "
+                    f"Test: {len(self.test_indices)}"
+                )
             else:
                 # Default to all indices as training
                 self.train_indices = list(range(self.length))
@@ -518,30 +565,30 @@ class TSDataModule(pl.LightningDataModule):
         # If precompute is False, create datasets on-demand during setup
         # Otherwise, datasets were already created during initialization
         if not self.precompute:
-            if stage == 'fit' or stage is None:
+            if stage == "fit" or stage is None:
                 self.train_dataset = TimeSeriesSubset(self, self.train_indices)
                 self.val_dataset = TimeSeriesSubset(self, self.val_indices)
 
-            if stage == 'test' or stage is None:
+            if stage == "test" or stage is None:
                 self.test_dataset = TimeSeriesSubset(self, self.test_indices)
 
     def train_dataloader(self):
         """Return a DataLoader for training."""
         if self.sampler is not None:
             return DataLoader(
-                self.train_dataset, 
+                self.train_dataset,
                 batch_size=self.batch_size,
                 sampler=self.sampler(self.train_dataset),
                 num_workers=self.num_workers,
-                collate_fn=custom_collate_fn
+                collate_fn=custom_collate_fn,
             )
         else:
             return DataLoader(
-                self.train_dataset, 
+                self.train_dataset,
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers,
-                collate_fn=custom_collate_fn
+                collate_fn=custom_collate_fn,
             )
 
     def val_dataloader(self):
@@ -550,11 +597,11 @@ class TSDataModule(pl.LightningDataModule):
             return None
 
         return DataLoader(
-            self.val_dataset, 
+            self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=custom_collate_fn
+            collate_fn=custom_collate_fn,
         )
 
     def test_dataloader(self):
@@ -563,11 +610,11 @@ class TSDataModule(pl.LightningDataModule):
             return None
 
         return DataLoader(
-            self.test_dataset, 
+            self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=custom_collate_fn
+            collate_fn=custom_collate_fn,
         )
 
 
@@ -577,7 +624,7 @@ class TimeSeriesSubset(Dataset):
     def __init__(self, data_module, indices):
         """
         Initialize the TimeSeriesSubset.
-        
+
         Args:
             data_module: The TSDataModule instance (stored as reference, not copy)
             indices: List of indices to include in this subset
@@ -606,14 +653,14 @@ def custom_collate_fn(batch):
 
     # Process each key in the batch
     for key in elem:
-        if key in ['st', 'group_id', 't', 'v']:  # Special handling for non-tensor data
+        if key in ["st", "group_id", "t", "v"]:  # Special handling for non-tensor data
             # Store as lists
             result[key] = [sample[key] for sample in batch]
         else:  # Default handling for tensors
             # For tensors, we can stack them
             try:
                 result[key] = torch.stack([sample[key] for sample in batch])
-            except:
+            except RuntimeError:
                 # If stacking fails, just store as a list
                 result[key] = [sample[key] for sample in batch]
 
