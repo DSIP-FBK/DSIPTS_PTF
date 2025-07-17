@@ -227,6 +227,7 @@ class MultiSourceTSDataSet(Dataset):
         # Internal state
         self.memory_efficient = memory_efficient
         self.chunk_size = chunk_size
+        self.max_length = None  # Can be set later if needed for time series regularization
 
         # Initialize label encoders for categorical columns
         self.label_encoders = {}

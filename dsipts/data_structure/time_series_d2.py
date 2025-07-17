@@ -653,14 +653,26 @@ def custom_collate_fn(batch):
 
     # Process each key in the batch
     for key in elem:
-        if key in ["st", "group_id", "t", "v"]:  # Special handling for non-tensor data
+        if key in ["group_id", "past_time", "future_time"]:  # Special handling for non-tensor data
             # Store as lists
             result[key] = [sample[key] for sample in batch]
         else:  # Default handling for tensors
             # For tensors, we can stack them
             try:
-                result[key] = torch.stack([sample[key] for sample in batch])
-            except RuntimeError:
+                # Convert numpy arrays to tensors first if needed
+                tensor_list = []
+                for sample in batch:
+                    item = sample[key]
+                    if isinstance(item, np.ndarray):
+                        tensor_list.append(torch.from_numpy(item))
+                    elif isinstance(item, torch.Tensor):
+                        tensor_list.append(item)
+                    else:
+                        # Convert other types to tensor
+                        tensor_list.append(torch.tensor(item))
+
+                result[key] = torch.stack(tensor_list)
+            except (RuntimeError, ValueError, TypeError):
                 # If stacking fails, just store as a list
                 result[key] = [sample[key] for sample in batch]
 
