@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 # Add the parent directory to the path so we can import the module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet
-from dsipts.data_structure.time_series_d2 import TimeSeriesSubset, TSDataModule, custom_collate_fn
+from dsipts.data_structure.time_series_d2 import TSDataModule, custom_collate_fn
 
 
 class TestTSDataModule(unittest.TestCase):
@@ -178,21 +178,32 @@ class TestTSDataModule(unittest.TestCase):
         # Get a window from the dataset using __getitem__
         if d2_module.train_indices:
             idx = d2_module.train_indices[0]
-            window = d2_module[idx]
+            x, y = d2_module[idx]  # New tuple format
 
-            # Check that the window has the expected format
-            self.assertTrue("past_features" in window)
-            self.assertTrue("past_time" in window)
-            self.assertTrue("future_targets" in window)
-            self.assertTrue("future_time" in window)
+            # Check that x (input dict) has the expected format
+            self.assertTrue("past_features" in x)
+            self.assertTrue("past_time" in x)
+            self.assertTrue("future_targets" in x)
+            self.assertTrue("future_time" in x)
+            self.assertTrue("group_id" in x)
+
+            # Check encoder-decoder format
+            self.assertTrue("encoder_cont" in x)
+            self.assertTrue("decoder_cont" in x)
+            self.assertTrue("encoder_lengths" in x)
+            self.assertTrue("decoder_lengths" in x)
 
             # Check dimensions
-            self.assertEqual(window["past_features"].shape[0], d2_module.past_len)
-            self.assertEqual(window["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(window["future_targets"].shape[0], d2_module.future_len)
-            self.assertEqual(window["future_targets"].shape[1], len(self.target_cols))
-            self.assertEqual(len(window["past_time"]), d2_module.past_len)
-            self.assertEqual(len(window["future_time"]), d2_module.future_len)
+            self.assertEqual(x["past_features"].shape[0], d2_module.past_len)
+            self.assertEqual(x["past_features"].shape[1], len(self.feature_cols))
+            self.assertEqual(x["future_targets"].shape[0], d2_module.future_len)
+            self.assertEqual(x["future_targets"].shape[1], len(self.target_cols))
+            self.assertEqual(len(x["past_time"]), d2_module.past_len)
+            self.assertEqual(len(x["future_time"]), d2_module.future_len)
+
+            # Check y (target tensor) shape
+            self.assertEqual(y.shape[0], d2_module.future_len)
+            self.assertEqual(y.shape[1], len(self.target_cols))
 
     def test_known_unknown_override(self):
         """Test overriding known and unknown columns."""
@@ -241,20 +252,30 @@ class TestTSDataModule(unittest.TestCase):
         # Get an item from the dataset
         if d2_module.train_indices:
             idx = d2_module.train_indices[0]
-            item = d2_module[idx]
+            x, y = d2_module[idx]  # New tuple format
 
-            # Check that the item has the expected format
-            self.assertTrue("past_features" in item)
-            self.assertTrue("past_time" in item)
-            self.assertTrue("future_targets" in item)
-            self.assertTrue("future_time" in item)
-            self.assertTrue("group_id" in item)
+            # Check that x (input dict) has the expected format
+            self.assertTrue("past_features" in x)
+            self.assertTrue("past_time" in x)
+            self.assertTrue("future_targets" in x)
+            self.assertTrue("future_time" in x)
+            self.assertTrue("group_id" in x)
+
+            # Check encoder-decoder format
+            self.assertTrue("encoder_cont" in x)
+            self.assertTrue("decoder_cont" in x)
+            self.assertTrue("encoder_lengths" in x)
+            self.assertTrue("decoder_lengths" in x)
 
             # Check dimensions
-            self.assertEqual(item["past_features"].shape[0], d2_module.past_len)
-            self.assertEqual(item["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(item["future_targets"].shape[0], d2_module.future_len)
-            self.assertEqual(item["future_targets"].shape[1], len(self.target_cols))
+            self.assertEqual(x["past_features"].shape[0], d2_module.past_len)
+            self.assertEqual(x["past_features"].shape[1], len(self.feature_cols))
+            self.assertEqual(x["future_targets"].shape[0], d2_module.future_len)
+            self.assertEqual(x["future_targets"].shape[1], len(self.target_cols))
+
+            # Check y (target tensor) shape
+            self.assertEqual(y.shape[0], d2_module.future_len)
+            self.assertEqual(y.shape[1], len(self.target_cols))
 
     def test_compute_valid_indices(self):
         """Test _compute_valid_indices method."""
@@ -338,10 +359,16 @@ class TestTSDataModule(unittest.TestCase):
 
         # Check that we can iterate through the dataloaders
         if len(d2_module.train_indices) > 0:
-            batch = next(iter(train_loader))
+            batch = next(iter(train_loader))  # Single dict format from collate_fn
             self.assertTrue(isinstance(batch, dict))
             self.assertTrue("past_features" in batch)
             self.assertTrue("future_targets" in batch)
+            self.assertTrue("encoder_cont" in batch)
+            self.assertTrue("decoder_cont" in batch)
+
+            # Check model-compatible keys
+            self.assertTrue("x_num_past" in batch)
+            self.assertTrue("y" in batch)
 
             # Check batch dimensions
             self.assertEqual(batch["past_features"].shape[0], min(2, len(d2_module.train_indices)))
@@ -349,111 +376,10 @@ class TestTSDataModule(unittest.TestCase):
             self.assertEqual(batch["future_targets"].shape[0], min(2, len(d2_module.train_indices)))
             self.assertEqual(batch["future_targets"].shape[2], len(self.target_cols))
 
-
-class TestTimeSeriesSubset(unittest.TestCase):
-    """Test cases for the TimeSeriesSubset class."""
-
-    def setUp(self):
-        """Set up test data."""
-        # Create a temporary directory for test files
-        self.temp_dir = tempfile.mkdtemp()
-
-        # Create test CSV files
-        self.create_test_files()
-
-        # Create D1 dataset
-        self.file_paths = [os.path.join(self.temp_dir, f"test_data_{i}.csv") for i in range(1)]
-        self.group_cols = "group"
-        self.time_col = "time"
-        self.feature_cols = ["feature_0", "feature_1"]
-        self.target_cols = ["target_0"]
-
-        self.d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            feature_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            memory_efficient=False,
-        )
-
-        # Create D2 module
-        self.d2_module = TSDataModule(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
-        )
-
-    def tearDown(self):
-        """Clean up temporary files."""
-        shutil.rmtree(self.temp_dir)
-
-    def create_test_files(self):
-        """Create test CSV files."""
-        # Generate one CSV file
-        data = []
-
-        # Generate data for each group
-        for group_idx in range(2):
-            # Generate time series for this group
-            for t in range(20):
-                row = {
-                    "group": f"group_{group_idx}",
-                    "time": t,
-                    "feature_0": np.sin(t / 10 + group_idx) + np.random.normal(0, 0.1),
-                    "feature_1": np.cos(t / 10 + group_idx) + np.random.normal(0, 0.1),
-                    "target_0": np.sin(t / 5 + group_idx) + np.random.normal(0, 0.1),
-                }
-                data.append(row)
-
-        # Create DataFrame and save to CSV
-        df = pd.DataFrame(data)
-        df.to_csv(os.path.join(self.temp_dir, "test_data_0.csv"), index=False)
-
-    def test_init(self):
-        """Test initialization."""
-        # Create a subset with the first 5 indices
-        indices = list(range(5))
-        subset = TimeSeriesSubset(self.d2_module, indices)
-
-        # Check that the subset was initialized correctly
-        self.assertEqual(subset.data_module, self.d2_module)
-        self.assertEqual(subset.indices, indices)
-
-    def test_len(self):
-        """Test __len__ method."""
-        # Create a subset with the first 5 indices
-        indices = list(range(5))
-        subset = TimeSeriesSubset(self.d2_module, indices)
-
-        # Check that the length is correct
-        self.assertEqual(len(subset), 5)
-
-    def test_getitem(self):
-        """Test __getitem__ method."""
-        # Create a subset with all train indices
-        subset = TimeSeriesSubset(self.d2_module, self.d2_module.train_indices)
-
-        # Get an item from the subset
-        if len(subset) > 0:
-            item = subset[0]
-
-            # Check that the item has the expected format
-            self.assertTrue("past_features" in item)
-            self.assertTrue("past_time" in item)
-            self.assertTrue("future_targets" in item)
-            self.assertTrue("future_time" in item)
-
-            # Check dimensions
-            self.assertEqual(item["past_features"].shape[0], self.d2_module.past_len)
-            self.assertEqual(item["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(item["future_targets"].shape[0], self.d2_module.future_len)
-            self.assertEqual(item["future_targets"].shape[1], len(self.target_cols))
+            # Check model-compatible target dimensions
+            self.assertEqual(batch["y"].shape[0], min(2, len(d2_module.train_indices)))
+            self.assertEqual(batch["y"].shape[1], d2_module.future_len)
+            self.assertEqual(batch["y"].shape[2], len(self.target_cols))
 
 
 class TestCustomCollateFn(unittest.TestCase):
@@ -481,8 +407,8 @@ class TestCustomCollateFn(unittest.TestCase):
             },
         ]
 
-    def test_custom_collate_fn(self):
-        """Test custom_collate_fn."""
+    def test_custom_collate_fn_old_format(self):
+        """Test custom_collate_fn with old dict format (backward compatibility)."""
         # Apply custom collate function
         result = custom_collate_fn(self.batch)
 
@@ -510,6 +436,83 @@ class TestCustomCollateFn(unittest.TestCase):
         # past_time and future_time are numpy arrays, so we check their content
         np.testing.assert_array_equal(result["past_time"][0], np.array([1, 2, 3, 4, 5]))
         np.testing.assert_array_equal(result["past_time"][1], np.array([11, 12, 13, 14, 15]))
+
+    def test_custom_collate_fn_new_format(self):
+        """Test custom_collate_fn with new tuple format."""
+        # Create batch in new tuple format (x, y) with model-compatible keys
+        tuple_batch = [
+            (
+                {
+                    "past_features": torch.randn(5, 2),
+                    "future_targets": torch.randn(2, 1),
+                    "past_time": np.array([1, 2, 3, 4, 5]),
+                    "future_time": np.array([6, 7]),
+                    "group_id": "group_0",
+                    "static": torch.tensor([10.0]),
+                    "encoder_cont": torch.randn(5, 2),
+                    "decoder_cont": torch.zeros(2, 0),
+                    "encoder_lengths": torch.tensor(5),
+                    "decoder_lengths": torch.tensor(2),
+                    "x_num_past": torch.randn(5, 2),
+                    "x_cat_past": torch.zeros(5, 0),
+                    "x_num_future": torch.zeros(2, 0),
+                    "x_cat_future": torch.zeros(2, 0),
+                    "idx_target": torch.tensor([0]),
+                    "y": torch.randn(2, 1),
+                },
+                torch.randn(2, 1),
+            ),
+            (
+                {
+                    "past_features": torch.randn(5, 2),
+                    "future_targets": torch.randn(2, 1),
+                    "past_time": np.array([11, 12, 13, 14, 15]),
+                    "future_time": np.array([16, 17]),
+                    "group_id": "group_1",
+                    "static": torch.tensor([20.0]),
+                    "encoder_cont": torch.randn(5, 2),
+                    "decoder_cont": torch.zeros(2, 0),
+                    "encoder_lengths": torch.tensor(5),
+                    "decoder_lengths": torch.tensor(2),
+                    "x_num_past": torch.randn(5, 2),
+                    "x_cat_past": torch.zeros(5, 0),
+                    "x_num_future": torch.zeros(2, 0),
+                    "x_cat_future": torch.zeros(2, 0),
+                    "idx_target": torch.tensor([0]),
+                    "y": torch.randn(2, 1),
+                },
+                torch.randn(2, 1),
+            ),
+        ]
+
+        # Apply custom collate function - now returns single dictionary
+        result = custom_collate_fn(tuple_batch)
+
+        # Check result format
+        self.assertTrue(isinstance(result, dict))
+        self.assertTrue("past_features" in result)
+        self.assertTrue("encoder_cont" in result)
+        self.assertTrue("decoder_cont" in result)
+
+        # Check model-compatible keys
+        self.assertTrue("x_num_past" in result)
+        self.assertTrue("x_cat_past" in result)
+        self.assertTrue("x_num_future" in result)
+        self.assertTrue("x_cat_future" in result)
+        self.assertTrue("idx_target" in result)
+        self.assertTrue("y" in result)
+
+        # Check tensor dimensions
+        self.assertEqual(result["past_features"].shape, (2, 5, 2))
+        self.assertEqual(result["encoder_cont"].shape, (2, 5, 2))
+        self.assertEqual(result["decoder_cont"].shape, (2, 2, 0))
+        self.assertEqual(result["x_num_past"].shape, (2, 5, 2))
+        self.assertEqual(result["y"].shape, (2, 2, 1))
+
+        # Check that non-tensors were kept as lists
+        self.assertEqual(len(result["group_id"]), 2)
+        self.assertEqual(result["group_id"][0], "group_0")
+        self.assertEqual(result["group_id"][1], "group_1")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
 """
 Time Series D2 Layer Module
 This module provides the D2 layer for time series data processing:
-- TSDataModule: LightningDataModule for time series data with support for
-  training, validation, and testing
+- TSDataModule: Main data module for time series processing
 - TimeSeriesSubset: Subset implementation for train/val/test splits
 - custom_collate_fn: Custom collate function for handling mixed data types
 Key Features:
@@ -21,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Sampler
 
 # Import the D1 layer
 from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet
@@ -30,6 +29,22 @@ from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+
+
+class TimeSeriesSubset:
+    """Simple subset class for TSDataModule splits."""
+
+    def __init__(self, data_module, indices):
+        self.data_module = data_module
+        self.indices = indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        # Map subset index to global index
+        global_idx = self.indices[idx]
+        return self.data_module[global_idx]
 
 
 class TSDataModule(pl.LightningDataModule):
@@ -479,24 +494,34 @@ class TSDataModule(pl.LightningDataModule):
 
     def __getitem__(self, idx):
         """
-        Get a time series window by global index.
+        Get a time series window by global index in encoder-decoder format.
 
         This method:
         1. Maps the global index to a specific group and local index
         2. Extracts the window from the group data
-        3. Returns the window in a format suitable for model training
+        3. Returns the window in encoder-decoder format suitable for model training
 
         Args:
             idx: Global index of the window to retrieve
 
         Returns:
-            Dictionary containing:
-            - past_features: Tensor of past features
-            - past_time: Array of past time points
-            - future_targets: Tensor of future targets
-            - future_time: Array of future time points
-            - group_id: Group identifier
-            - static: Static features tensor
+            Tuple (x, y) where:
+            x: Dictionary containing model inputs:
+                - encoder_cat: Categorical features for encoder (past_len, n_cat_features)
+                - encoder_cont: Continuous features for encoder (past_len, n_cont_features)
+                - decoder_cat: Known categorical features for decoder (future_len, n_cat_features)
+                - decoder_cont: Known continuous features for decoder (future_len, n_cont_features)
+                - encoder_lengths: Length of encoder sequence
+                - decoder_lengths: Length of decoder sequence
+                - groups: Group identifier
+                - encoder_time_idx: Time indices for encoder
+                - decoder_time_idx: Time indices for decoder
+                - target_scale: Scaling factor for targets
+                - encoder_mask: Boolean mask for valid encoder time points
+                - decoder_mask: Boolean mask for valid decoder time points
+                - static_categorical_features: Static categorical features (if available)
+                - static_continuous_features: Static continuous features (if available)
+            y: Target values for decoder sequence (future_len, n_targets)
         """
         # Map global index to group and local index
         group_idx, local_idx = self.mapping[idx]
@@ -515,18 +540,100 @@ class TSDataModule(pl.LightningDataModule):
         future_targets = group_data["y"][past_end_idx:future_end_idx]
         future_time = group_data["t"][past_end_idx:future_end_idx]
 
-        # Get static features
-        static = group_data.get("st", torch.tensor([]))
+        # Convert to tensors if needed
+        if isinstance(past_features, np.ndarray):
+            past_features = torch.from_numpy(past_features).float()
+        elif not isinstance(past_features, torch.Tensor):
+            past_features = torch.tensor(past_features, dtype=torch.float32)
 
-        # Return the window as a dictionary
-        return {
-            "past_features": past_features,
-            "past_time": past_time,
-            "future_targets": future_targets,
-            "future_time": future_time,
-            "group_id": group_data["group_id"],
-            "static": static,
+        if isinstance(future_targets, np.ndarray):
+            future_targets = torch.from_numpy(future_targets).float()
+        elif not isinstance(future_targets, torch.Tensor):
+            future_targets = torch.tensor(future_targets, dtype=torch.float32)
+
+        # Ensure targets have proper shape (add feature dimension if needed)
+        if future_targets.ndim == 1:
+            future_targets = future_targets.unsqueeze(-1)
+
+        # Create encoder features (past)
+        encoder_cat = torch.zeros((self.past_len, 0))  # No categorical features for now
+        encoder_cont = past_features if past_features.ndim > 1 else past_features.unsqueeze(-1)
+
+        # Create decoder features (future) - only known features would be available
+        # For now, assume no future features are known
+        decoder_cat = torch.zeros((self.future_len, 0))
+        decoder_cont = torch.zeros((self.future_len, 0))
+
+        # Calculate target scale (for normalization)
+        target_scale = encoder_cont.abs().mean()
+        if torch.isnan(target_scale) or target_scale == 0:
+            target_scale = torch.tensor(1.0)
+
+        # Create masks (assume all time points are valid for now)
+        encoder_mask = torch.ones(self.past_len, dtype=torch.bool)
+        decoder_mask = torch.ones(self.future_len, dtype=torch.bool)
+
+        # Handle static features
+        static = group_data.get("st", torch.tensor([]))
+        if isinstance(static, np.ndarray):
+            static = torch.from_numpy(static).float()
+        elif not isinstance(static, torch.Tensor):
+            static = (
+                torch.tensor(static, dtype=torch.float32) if len(static) > 0 else torch.tensor([])
+            )
+
+        # Create the input dictionary
+        x = {
+            "encoder_cat": encoder_cat,
+            "encoder_cont": encoder_cont,
+            "decoder_cat": decoder_cat,
+            "decoder_cont": decoder_cont,
+            "encoder_lengths": torch.tensor(self.past_len),
+            "decoder_lengths": torch.tensor(self.future_len),
+            "decoder_target_lengths": torch.tensor(self.future_len),
+            "groups": torch.tensor([group_idx]),
+            "encoder_time_idx": torch.arange(self.past_len),
+            "decoder_time_idx": torch.arange(self.past_len, self.past_len + self.future_len),
+            "target_scale": target_scale,
+            "encoder_mask": encoder_mask,
+            "decoder_mask": decoder_mask,
         }
+
+        # Add static features if available
+        if len(static) > 0:
+            # For simplicity, treat all static features as continuous
+            x["static_categorical_features"] = torch.zeros((1, 0), dtype=torch.float32)
+            x["static_continuous_features"] = static.unsqueeze(0) if static.ndim == 1 else static
+        else:
+            x["static_categorical_features"] = torch.zeros((1, 0), dtype=torch.float32)
+            x["static_continuous_features"] = torch.zeros((1, 0), dtype=torch.float32)
+
+        # Add model-compatible keys for direct integration
+        # Determine target feature indices (assume all features can be targets for now)
+        n_target_features = future_targets.shape[-1] if future_targets.ndim > 1 else 1
+        idx_target = torch.arange(n_target_features)
+
+        x.update(
+            {
+                # Model-compatible keys
+                "x_num_past": encoder_cont,
+                "x_cat_past": encoder_cat,
+                "x_num_future": decoder_cont,
+                "x_cat_future": decoder_cat,
+                "idx_target": idx_target,
+                "y": future_targets,
+                # Backward compatibility fields
+                "past_features": encoder_cont,
+                "future_targets": future_targets,
+                # Additional metadata
+                "past_time": past_time,
+                "future_time": future_time,
+                "group_id": group_data["group_id"],
+                "static": static,
+            }
+        )
+
+        return x, future_targets
 
     def setup(self, stage=None):
         """
@@ -618,62 +725,46 @@ class TSDataModule(pl.LightningDataModule):
         )
 
 
-class TimeSeriesSubset(Dataset):
-    """Subset of a D2 processor dataset that implements the Dataset interface."""
-
-    def __init__(self, data_module, indices):
-        """
-        Initialize the TimeSeriesSubset.
-
-        Args:
-            data_module: The TSDataModule instance (stored as reference, not copy)
-            indices: List of indices to include in this subset
-        """
-        # In Python, this assignment creates a reference to the original data_module object
-        # No copying occurs, so all subsets share the same data_module instance
-        self.data_module = data_module
-        self.indices = indices
-
-    def __len__(self):
-        """Return the number of samples in this subset."""
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        """Get a sample from the data module using the mapped index."""
-        return self.data_module[self.indices[idx]]
-
-
 def custom_collate_fn(batch):
     """
-    Custom collate function for the DataLoader to handle mixed data types.
-    Handles static features that may be objects or other non-tensor types.
-    """
-    elem = batch[0]
-    result = {}
+    Custom collate function for the DataLoader to handle model-compatible format.
 
-    # Process each key in the batch
-    for key in elem:
-        if key in ["group_id", "past_time", "future_time"]:  # Special handling for non-tensor data
-            # Store as lists
-            result[key] = [sample[key] for sample in batch]
-        else:  # Default handling for tensors
-            # For tensors, we can stack them
+    Args:
+        batch: List of tuples (x, y) where x is input dict containing targets
+
+    Returns:
+        Dictionary with batched tensors compatible with model layer
+    """
+    # Extract input dictionaries from tuples
+    if isinstance(batch[0], tuple):
+        x_list = [item[0] for item in batch]
+    else:
+        # Handle case where batch items are already dictionaries
+        x_list = batch
+
+    # Create batched dictionary
+    result = {}
+    elem_x = x_list[0]
+
+    for key in elem_x:
+        if key in ["group_id", "past_time", "future_time"]:  # Non-tensor data
+            result[key] = [sample[key] for sample in x_list]
+        else:  # Tensor data
             try:
-                # Convert numpy arrays to tensors first if needed
+                # Convert and stack tensors
                 tensor_list = []
-                for sample in batch:
+                for sample in x_list:
                     item = sample[key]
                     if isinstance(item, np.ndarray):
                         tensor_list.append(torch.from_numpy(item))
                     elif isinstance(item, torch.Tensor):
                         tensor_list.append(item)
                     else:
-                        # Convert other types to tensor
                         tensor_list.append(torch.tensor(item))
 
                 result[key] = torch.stack(tensor_list)
             except (RuntimeError, ValueError, TypeError):
-                # If stacking fails, just store as a list
-                result[key] = [sample[key] for sample in batch]
+                # If stacking fails, store as list
+                result[key] = [sample[key] for sample in x_list]
 
     return result
