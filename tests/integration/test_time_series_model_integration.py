@@ -293,7 +293,7 @@ class TestTimeSeriesIntegration:
             hidden_size=128,
             dropout_rate=0.1,
             kind="linear",
-            simple=False,  # Use complex mode to avoid seasonal_init bug
+            simple=False,  # avoids seasonal_init bug
         )
 
         # Test forward pass
