@@ -416,11 +416,8 @@ class TSDataModule(pl.LightningDataModule):
                 test_indices = sorted_indices[train_size + val_size :]
 
                 print(
-                    (
-                        "Temporal percentage-based split - Train: "
-                        f"{len(train_indices)}, Val: {len(val_indices)}, "
-                        f"Test: {len(test_indices)} samples"
-                    )
+                    f"Temporal percentage-based split - Train: {len(train_indices)}, "
+                    f"Val: {len(val_indices)}, Test: {len(test_indices)} samples"
                 )
 
             except (TypeError, ValueError) as e:
