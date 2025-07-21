@@ -387,9 +387,6 @@ class TSDataModule(pl.LightningDataModule):
             # Calculate number of samples for each split
             train_size = int(total_samples * train_pct)
             val_size = int(total_samples * val_pct)
-            # remaining samples for test split
-            _ = total_samples - train_size - val_size
-
             # For temporal splits, sort by time
             all_indices = list(range(total_samples))
 
