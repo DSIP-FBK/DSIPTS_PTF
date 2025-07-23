@@ -11,12 +11,14 @@ from torch.utils.data import DataLoader
 
 # Add the parent directory to the path so we can import the module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from dsipts.data_structure.time_series_d1 import MultiSourceTSDataSet
-from dsipts.data_structure.time_series_d2 import TSDataModule, custom_collate_fn
+
+# Import from new structure only
+from dsipts.data_structure.d1_layers import MultiSourceTSDataSet
+from dsipts.data_structure.d2_layers import EncoderDecoder, custom_collate_fn
 
 
-class TestTSDataModule(unittest.TestCase):
-    """Test cases for the TSDataModule class."""
+class TestEncoderDecoder(unittest.TestCase):
+    """Test cases for the EncoderDecoder class (formerly TSDataModule)."""
 
     def setUp(self):
         """Set up test data."""
@@ -41,7 +43,6 @@ class TestTSDataModule(unittest.TestCase):
             feature_cols=self.feature_cols,
             target_cols=self.target_cols,
             cat_cols=self.cat_cols,
-            memory_efficient=False,
         )
 
     def tearDown(self):
@@ -76,7 +77,7 @@ class TestTSDataModule(unittest.TestCase):
 
     def test_init_percentage_split(self):
         """Test initialization with percentage split."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -84,7 +85,7 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
+            precompute=True,
         )
 
         # Check that the module was initialized correctly
@@ -95,42 +96,39 @@ class TestTSDataModule(unittest.TestCase):
         self.assertEqual(d2_module.split_method, "percentage")
         self.assertEqual(d2_module.split_config, (0.7, 0.15, 0.15))
 
-        # Check that splits were created
-        self.assertTrue(hasattr(d2_module, "train_indices"))
-        self.assertTrue(hasattr(d2_module, "val_indices"))
-        self.assertTrue(hasattr(d2_module, "test_indices"))
+        # Check that datasets were created
+        self.assertTrue(hasattr(d2_module, "train_dataset"))
+        self.assertTrue(hasattr(d2_module, "val_dataset"))
+        self.assertTrue(hasattr(d2_module, "test_dataset"))
 
         # Check that the sum of split sizes equals the total number of windows
-        total_windows = len(d2_module.mapping)
+        total_windows = len(d2_module.valid_windows)
         split_sum = (
-            len(d2_module.train_indices) + len(d2_module.val_indices) + len(d2_module.test_indices)
+            len(d2_module.train_dataset) + len(d2_module.val_dataset) + len(d2_module.test_dataset)
         )
-        self.assertEqual(split_sum, total_windows)
+        self.assertEqual(total_windows, split_sum)
 
         # Check approximate split ratios (allowing for rounding)
-        self.assertAlmostEqual(len(d2_module.train_indices) / total_windows, 0.7, delta=0.05)
-        self.assertAlmostEqual(len(d2_module.val_indices) / total_windows, 0.15, delta=0.05)
-        self.assertAlmostEqual(len(d2_module.test_indices) / total_windows, 0.15, delta=0.05)
+        self.assertAlmostEqual(len(d2_module.train_dataset) / total_windows, 0.7, delta=0.05)
+        self.assertAlmostEqual(len(d2_module.val_dataset) / total_windows, 0.15, delta=0.05)
+        self.assertAlmostEqual(len(d2_module.test_dataset) / total_windows, 0.15, delta=0.05)
 
     def test_init_group_split(self):
         """Test initialization with group split."""
-        # Get all group indices
-        all_groups = list(range(len(self.d1_dataset)))
+        # Define group splits
+        train_groups = ["group_0"]
+        val_groups = ["group_1"]
+        test_groups = ["group_2"]
 
-        # Split groups into train/val/test
-        train_groups = all_groups[: int(0.7 * len(all_groups))]
-        val_groups = all_groups[int(0.7 * len(all_groups)) : int(0.85 * len(all_groups))]
-        test_groups = all_groups[int(0.85 * len(all_groups)) :]
-
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
-            batch_size=32,
+            batch_size=16,
             min_valid_length=4,
             split_method="group",
             split_config=(train_groups, val_groups, test_groups),
-            memory_efficient=False,
+            precompute=True,
         )
 
         # Check that the module was initialized correctly
@@ -138,33 +136,32 @@ class TestTSDataModule(unittest.TestCase):
         self.assertEqual(d2_module.future_len, 2)
         self.assertEqual(d2_module.split_method, "group")
 
-        # Check that splits were created
-        self.assertTrue(hasattr(d2_module, "train_indices"))
-        self.assertTrue(hasattr(d2_module, "val_indices"))
-        self.assertTrue(hasattr(d2_module, "test_indices"))
+        # Check that datasets were created
+        self.assertTrue(hasattr(d2_module, "train_dataset"))
+        self.assertTrue(hasattr(d2_module, "val_dataset"))
+        self.assertTrue(hasattr(d2_module, "test_dataset"))
 
         # Check that each split only contains windows from the assigned groups
         # Note: The actual group assignment may differ from expected due to data availability
         # So we'll check that splits are non-empty and indices are valid
-        if d2_module.train_indices:
-            for idx in d2_module.train_indices:
-                group_idx, _ = d2_module.mapping[idx]
-                # Just verify the group_idx is valid
-                self.assertTrue(0 <= group_idx < len(d2_module.d1_dataset))
+        if len(d2_module.train_dataset) > 0:
+            for idx in d2_module.train_dataset.indices:
+                # Just verify the index is valid
+                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
 
-        if d2_module.val_indices:
-            for idx in d2_module.val_indices:
-                group_idx, _ = d2_module.mapping[idx]
-                self.assertTrue(0 <= group_idx < len(d2_module.d1_dataset))
+        if len(d2_module.val_dataset) > 0:
+            for idx in d2_module.val_dataset.indices:
+                # Just verify the index is valid
+                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
 
-        if d2_module.test_indices:
-            for idx in d2_module.test_indices:
-                group_idx, _ = d2_module.mapping[idx]
-                self.assertTrue(0 <= group_idx < len(d2_module.d1_dataset))
+        if len(d2_module.test_dataset) > 0:
+            for idx in d2_module.test_dataset.indices:
+                # Just verify the index is valid
+                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
 
     def test_get_window(self):
         """Test getting a window using __getitem__ method."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -172,38 +169,37 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
         )
 
         # Get a window from the dataset using __getitem__
-        if d2_module.train_indices:
-            idx = d2_module.train_indices[0]
-            x, y = d2_module[idx]  # New tuple format
+        if len(d2_module.train_dataset) > 0:
+            idx = d2_module.train_dataset.indices[0]
+            item = d2_module[idx]  # New tuple format
 
             # Check that x (input dict) has the expected format
-            self.assertTrue("past_features" in x)
-            self.assertTrue("past_time" in x)
-            self.assertTrue("future_targets" in x)
-            self.assertTrue("future_time" in x)
-            self.assertTrue("group_id" in x)
+            self.assertTrue("past_features" in item[0])
+            self.assertTrue("past_time" in item[0])
+            self.assertTrue("future_targets" in item[0])
+            self.assertTrue("future_time" in item[0])
+            self.assertTrue("group_id" in item[0])
 
             # Check encoder-decoder format
-            self.assertTrue("encoder_cont" in x)
-            self.assertTrue("decoder_cont" in x)
-            self.assertTrue("encoder_lengths" in x)
-            self.assertTrue("decoder_lengths" in x)
+            self.assertTrue("encoder_cont" in item[0])
+            self.assertTrue("decoder_cont" in item[0])
+            self.assertTrue("encoder_lengths" in item[0])
+            self.assertTrue("decoder_lengths" in item[0])
 
             # Check dimensions
-            self.assertEqual(x["past_features"].shape[0], d2_module.past_len)
-            self.assertEqual(x["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(x["future_targets"].shape[0], d2_module.future_len)
-            self.assertEqual(x["future_targets"].shape[1], len(self.target_cols))
-            self.assertEqual(len(x["past_time"]), d2_module.past_len)
-            self.assertEqual(len(x["future_time"]), d2_module.future_len)
+            self.assertEqual(item[0]["past_features"].shape[0], d2_module.past_len)
+            self.assertEqual(item[0]["past_features"].shape[1], len(self.feature_cols))
+            self.assertEqual(item[0]["future_targets"].shape[0], d2_module.future_len)
+            self.assertEqual(item[0]["future_targets"].shape[1], len(self.target_cols))
+            self.assertEqual(len(item[0]["past_time"]), d2_module.past_len)
+            self.assertEqual(len(item[0]["future_time"]), d2_module.future_len)
 
             # Check y (target tensor) shape
-            self.assertEqual(y.shape[0], d2_module.future_len)
-            self.assertEqual(y.shape[1], len(self.target_cols))
+            self.assertEqual(item[1].shape[0], d2_module.future_len)
+            self.assertEqual(item[1].shape[1], len(self.target_cols))
 
     def test_known_unknown_override(self):
         """Test overriding known and unknown columns."""
@@ -211,7 +207,7 @@ class TestTSDataModule(unittest.TestCase):
         known_cols = ["feature_0"]
         unknown_cols = ["feature_1", "target_0"]
 
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -219,7 +215,6 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
             known_cols=known_cols,
             unknown_cols=unknown_cols,
         )
@@ -228,17 +223,21 @@ class TestTSDataModule(unittest.TestCase):
         self.assertListEqual(d2_module.known_cols, known_cols)
         self.assertListEqual(d2_module.unknown_cols, unknown_cols)
 
-        # Check metadata
-        self.assertListEqual(d2_module.metadata["known_cols"], known_cols)
-        self.assertListEqual(d2_module.metadata["unknown_cols"], unknown_cols)
-        self.assertListEqual(
-            d2_module.metadata["known_num_cols"], known_cols
-        )  # feature_0 is numerical
-        self.assertEqual(len(d2_module.metadata["known_cat_cols"]), 0)  # No categorical known cols
+        # Check that known and unknown columns were correctly set
+        # EncoderDecoder doesn't have a metadata attribute, so we just check the attributes directly
+        self.assertListEqual(d2_module.known_cols, known_cols)
+        self.assertListEqual(d2_module.unknown_cols, unknown_cols)
+
+        # Check categorical vs numerical columns
+        # All known columns should be in either cat_feature_cols or cont_feature_cols
+        known_num_cols = [col for col in known_cols if col in d2_module.cont_feature_cols]
+        known_cat_cols = [col for col in known_cols if col in d2_module.cat_feature_cols]
+        self.assertEqual(len(known_num_cols), 1)  # feature_0 is numerical
+        self.assertEqual(len(known_cat_cols), 0)  # No categorical known cols
 
     def test_getitem(self):
         """Test __getitem__ method."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -246,40 +245,38 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
         )
 
         # Get an item from the dataset
-        if d2_module.train_indices:
-            idx = d2_module.train_indices[0]
-            x, y = d2_module[idx]  # New tuple format
+        if len(d2_module.train_dataset) > 0:
+            idx = d2_module.train_dataset.indices[0]
+            item = d2_module[idx]  # New tuple format
 
             # Check that x (input dict) has the expected format
-            self.assertTrue("past_features" in x)
-            self.assertTrue("past_time" in x)
-            self.assertTrue("future_targets" in x)
-            self.assertTrue("future_time" in x)
-            self.assertTrue("group_id" in x)
-
+            self.assertTrue("past_features" in item[0])
+            self.assertTrue("past_time" in item[0])
+            self.assertTrue("future_targets" in item[0])
+            self.assertTrue("future_time" in item[0])
+            self.assertTrue("group_id" in item[0])
             # Check encoder-decoder format
-            self.assertTrue("encoder_cont" in x)
-            self.assertTrue("decoder_cont" in x)
-            self.assertTrue("encoder_lengths" in x)
-            self.assertTrue("decoder_lengths" in x)
+            self.assertTrue("encoder_cont" in item[0])
+            self.assertTrue("decoder_cont" in item[0])
+            self.assertTrue("encoder_lengths" in item[0])
+            self.assertTrue("decoder_lengths" in item[0])
 
             # Check dimensions
-            self.assertEqual(x["past_features"].shape[0], d2_module.past_len)
-            self.assertEqual(x["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(x["future_targets"].shape[0], d2_module.future_len)
-            self.assertEqual(x["future_targets"].shape[1], len(self.target_cols))
+            self.assertEqual(item[0]["past_features"].shape[0], d2_module.past_len)
+            self.assertEqual(item[0]["past_features"].shape[1], len(self.feature_cols))
+            self.assertEqual(item[0]["future_targets"].shape[0], d2_module.future_len)
+            self.assertEqual(item[0]["future_targets"].shape[1], len(self.target_cols))
 
             # Check y (target tensor) shape
-            self.assertEqual(y.shape[0], d2_module.future_len)
-            self.assertEqual(y.shape[1], len(self.target_cols))
+            self.assertEqual(item[1].shape[0], d2_module.future_len)
+            self.assertEqual(item[1].shape[1], len(self.target_cols))
 
     def test_compute_valid_indices(self):
         """Test _compute_valid_indices method."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -287,29 +284,32 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
+            precompute=True,
         )
 
-        # Check that valid indices were computed
-        self.assertTrue(hasattr(d2_module, "valid_indices"))
-        self.assertTrue(len(d2_module.valid_indices) > 0)
+        # Check that valid windows were computed
+        self.assertTrue(hasattr(d2_module, "valid_windows"))
+        self.assertTrue(len(d2_module.valid_windows) > 0)
 
-        # Each valid index should have enough data points
-        for group_idx, valid_idx_list in d2_module.valid_indices.items():
-            group_data = d2_module.d1_dataset[group_idx]
-            for local_idx in valid_idx_list:
-                # Should have enough past and future data
-                # local_idx is the start of the past window, so:
-                # - past window: [local_idx : local_idx + past_len]
-                # - future window: [local_idx + past_len : local_idx + past_len + future_len]
-                self.assertTrue(
-                    local_idx + d2_module.past_len + d2_module.future_len <= len(group_data["t"])
-                )
-                self.assertTrue(local_idx >= 0)
+        # Each valid window should have enough data points
+        for window in d2_module.valid_windows:
+            # Check that window has required fields
+            self.assertIn("group_id", window)
+            self.assertIn("past_indices", window)
+            self.assertIn("future_indices", window)
+            self.assertIn("start_idx", window)
+
+            # Check that start index is valid
+            start_idx = window["start_idx"]
+            self.assertTrue(start_idx >= 0)
+
+            # Check that indices are valid
+            self.assertEqual(len(window["past_indices"]), d2_module.past_len)
+            self.assertEqual(len(window["future_indices"]), d2_module.future_len)
 
     def test_create_splits(self):
         """Test _create_splits method."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -317,22 +317,26 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
+            precompute=True,
         )
 
-        # Check that splits were created
-        self.assertTrue(hasattr(d2_module, "train_indices"))
-        self.assertTrue(hasattr(d2_module, "val_indices"))
-        self.assertTrue(hasattr(d2_module, "test_indices"))
+        # Check that datasets were created
+        self.assertTrue(hasattr(d2_module, "train_dataset"))
+        self.assertTrue(hasattr(d2_module, "val_dataset"))
+        self.assertTrue(hasattr(d2_module, "test_dataset"))
 
         # Check that all indices in splits are valid
-        all_indices = d2_module.train_indices + d2_module.val_indices + d2_module.test_indices
+        all_indices = (
+            list(d2_module.train_dataset.indices)
+            + list(d2_module.val_dataset.indices)
+            + list(d2_module.test_dataset.indices)
+        )
         for idx in all_indices:
-            self.assertTrue(0 <= idx < len(d2_module.mapping))
+            self.assertTrue(0 <= idx < len(d2_module.valid_windows))
 
     def test_dataloaders(self):
         """Test train/val/test dataloader methods."""
-        d2_module = TSDataModule(
+        d2_module = EncoderDecoder(
             d1_dataset=self.d1_dataset,
             past_len=5,
             future_len=2,
@@ -340,7 +344,7 @@ class TestTSDataModule(unittest.TestCase):
             min_valid_length=4,
             split_method="percentage",
             split_config=(0.7, 0.15, 0.15),
-            memory_efficient=False,
+            precompute=True,
             num_workers=0,  # Use 0 workers for testing
         )
 
@@ -354,11 +358,11 @@ class TestTSDataModule(unittest.TestCase):
         self.assertIsInstance(val_loader, DataLoader)
 
         # Test loader might be None if no test data
-        if len(d2_module.test_indices) > 0:
+        if len(d2_module.test_dataset) > 0:
             self.assertIsInstance(test_loader, DataLoader)
 
         # Check that we can iterate through the dataloaders
-        if len(d2_module.train_indices) > 0:
+        if len(d2_module.train_dataset) > 0:
             batch = next(iter(train_loader))  # Single dict format from collate_fn
             self.assertTrue(isinstance(batch, dict))
             self.assertTrue("past_features" in batch)
@@ -371,15 +375,40 @@ class TestTSDataModule(unittest.TestCase):
             self.assertTrue("y" in batch)
 
             # Check batch dimensions
-            self.assertEqual(batch["past_features"].shape[0], min(2, len(d2_module.train_indices)))
+            self.assertEqual(batch["past_features"].shape[0], min(2, len(d2_module.train_dataset)))
             self.assertEqual(batch["past_features"].shape[2], len(self.feature_cols))
-            self.assertEqual(batch["future_targets"].shape[0], min(2, len(d2_module.train_indices)))
+            self.assertEqual(batch["future_targets"].shape[0], min(2, len(d2_module.train_dataset)))
             self.assertEqual(batch["future_targets"].shape[2], len(self.target_cols))
 
             # Check model-compatible target dimensions
-            self.assertEqual(batch["y"].shape[0], min(2, len(d2_module.train_indices)))
+            self.assertEqual(batch["y"].shape[0], min(2, len(d2_module.train_dataset)))
             self.assertEqual(batch["y"].shape[1], d2_module.future_len)
             self.assertEqual(batch["y"].shape[2], len(self.target_cols))
+
+    def test_backward_compatibility_imports(self):
+        """Test that legacy D2 imports still work."""
+        # Test legacy imports from main module
+        from dsipts.data_structure import EncoderDecoder, TSDataModule
+
+        # These should be importable without errors and should be the same class
+        assert TSDataModule is not None
+        assert TSDataModule is EncoderDecoder  # Should be an alias
+
+        # Test that we can create instances using the legacy name
+        d2_legacy = TSDataModule(
+            d1_dataset=self.d1_dataset,
+            past_len=5,
+            future_len=2,
+            batch_size=32,
+            precompute=True,
+        )
+
+        # Should have the same interface as EncoderDecoder
+        self.assertEqual(d2_legacy.past_len, 5)
+        self.assertEqual(d2_legacy.future_len, 2)
+        self.assertTrue(hasattr(d2_legacy, "train_dataloader"))
+        self.assertTrue(hasattr(d2_legacy, "val_dataloader"))
+        self.assertTrue(hasattr(d2_legacy, "test_dataloader"))
 
 
 class TestCustomCollateFn(unittest.TestCase):
