@@ -18,18 +18,159 @@ from ..d1_layers.base_d1 import BaseD1Layer
 logger = logging.getLogger(__name__)
 
 
-class TimeSeriesSubset:
-    """Minimal subset class for dataset splits."""
+class EncoderDecoderDataset:
+    """Dataset class that handles windowing logic and encoder-decoder structure creation."""
 
-    def __init__(self, dataset, indices):
+    def __init__(
+        self,
+        d1_dataset: BaseD1Layer,
+        valid_windows: List[Dict],
+        past_len: int,
+        future_len: int,
+        target_cols: List[str],
+        cat_cols: List[str] = None,
+        cont_feature_cols: List[str] = None,
+        cat_feature_cols: List[str] = None,
+    ):
+        """Initialize the encoder-decoder dataset.
+
+        Args:
+            d1_dataset: The D1 layer dataset
+            valid_windows: List of valid window dictionaries
+            past_len: Length of past sequence
+            future_len: Length of future sequence
+            target_cols: Target column names
+            cat_cols: Categorical column names
+            cont_feature_cols: Continuous feature column names
+            cat_feature_cols: Categorical feature column names
+        """
+        self.d1_dataset = d1_dataset
+        self.valid_windows = valid_windows
+        self.past_len = past_len
+        self.future_len = future_len
+        self.target_cols = target_cols or []
+        self.cat_cols = cat_cols or []
+        self.cont_feature_cols = cont_feature_cols or []
+        # Auto-detect categorical feature columns from D1 dataset if not provided
+        if cat_feature_cols is None:
+            try:
+                # Access the cat_cols property from D1 dataset
+                cat_cols_from_d1 = d1_dataset.cat_cols
+                print(f"DEBUG: D1 cat_cols: {cat_cols_from_d1}")
+                self.cat_feature_cols = cat_cols_from_d1 or []
+                print(f"DEBUG: Set cat_feature_cols to: {self.cat_feature_cols}")
+            except (AttributeError, TypeError) as e:
+                print(f"DEBUG: Error accessing cat_cols: {e}")
+                self.cat_feature_cols = []
+        else:
+            self.cat_feature_cols = cat_feature_cols
+            print(f"DEBUG: Using provided cat_feature_cols: {self.cat_feature_cols}")
+
+    def __len__(self):
+        """Return the number of valid windows."""
+        return len(self.valid_windows)
+
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+        """
+        Get a sample with encoder-decoder structure.
+
+        Args:
+            idx: Index of the window to retrieve
+
+        Returns:
+            Tuple of (input_dict, target_tensor) where input_dict contains
+            clean batch structure with only necessary keys
+        """
+        window = self.valid_windows[idx]
+        past_indices = window["past_indices"]
+        future_indices = window["future_indices"]
+
+        # Get past and future data
+        past_samples = [self.d1_dataset[i] for i in past_indices]
+        future_samples = [self.d1_dataset[i] for i in future_indices]
+
+        # Extract features and targets
+        past_features = torch.stack([sample["x"] for sample in past_samples])
+        future_targets = torch.stack([sample["y"] for sample in future_samples])
+
+        # Build clean input dictionary - only include keys when data is present
+        x = {}
+
+        # Core LinearTS model keys (always present)
+        x["x_num_past"] = past_features  # Past numerical features
+        x["y"] = future_targets  # Target values for training
+        x["idx_target"] = torch.tensor(list(range(len(self.target_cols))))  # Target indices
+
+        # Add categorical features only if present
+        if len(self.cat_feature_cols) > 0:
+            # Extract categorical features from past samples
+            cat_features = torch.zeros(self.past_len, len(self.cat_feature_cols), dtype=torch.long)
+            for i, sample in enumerate(past_samples):
+                if "categorical" in sample and sample["categorical"] is not None:
+                    # Extract categorical features for this time step
+                    cat_data = sample["categorical"]
+                    if isinstance(cat_data, np.ndarray):
+                        cat_features[i] = torch.from_numpy(cat_data.astype(np.int64))
+                    else:
+                        cat_features[i] = torch.tensor(cat_data, dtype=torch.long)
+            x["x_cat_past"] = cat_features
+
+        # Add future numerical features only if present (known future features)
+        if len(self.cont_feature_cols) > 0 and hasattr(self, "_has_future_features"):
+            future_cont = torch.zeros(self.future_len, len(self.cont_feature_cols))
+            x["x_num_future"] = future_cont
+
+        # Add future categorical features only if present
+        if len(self.cat_feature_cols) > 0:
+            # Always provide future categorical features if we have categorical features
+            # This ensures the LinearTS complex case gets the expected input dimensions
+            future_cat = torch.zeros(self.future_len, len(self.cat_feature_cols), dtype=torch.long)
+            x["x_cat_future"] = future_cat
+
+        # Add static features only if present
+        if len(self.cat_cols) > 0:
+            static_cat = torch.zeros(len(self.cat_cols))
+            x["static_categorical_features"] = static_cat
+
+        # Backward compatibility keys (kept for existing code)
+        x["past_features"] = past_features
+        x["future_targets"] = future_targets
+
+        # Essential metadata
+        x["group_id"] = window.get("group_id", 0)
+        x["time_idx"] = torch.arange(self.past_len)[-1].item()  # Last time index
+
+        # Target tensor (for loss computation)
+        y = future_targets
+
+        return x, y
+
+
+class TimeSeriesSubset:
+    """Subset class for dataset splits - delegates to EncoderDecoderDataset."""
+
+    def __init__(self, dataset: EncoderDecoderDataset, indices: List[int]):
         self.dataset = dataset
         self.indices = indices
 
     def __len__(self):
+        """Return the number of samples in this subset."""
         return len(self.indices)
 
-    def __getitem__(self, idx):
-        return self.dataset[self.indices[idx]]
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+        """
+        Get a sample with encoder-decoder structure.
+
+        Args:
+            idx: Index of the window to retrieve
+
+        Returns:
+            Tuple of (input_dict, target_tensor) where input_dict contains
+            encoder-decoder structure compatible with PyTorch Forecasting
+        """
+        # Map subset index to dataset index
+        dataset_idx = self.indices[idx]
+        return self.dataset[dataset_idx]
 
 
 class EncoderDecoder(pl.LightningDataModule):
@@ -53,10 +194,7 @@ class EncoderDecoder(pl.LightningDataModule):
         split_config: Optional[tuple] = None,
         num_workers: int = 0,
         sampler: Optional[Sampler] = None,
-        known_cols: Optional[List[str]] = None,
-        unknown_cols: Optional[List[str]] = None,
         target_normalizer: Optional[str] = None,
-        categorical_encoders: Optional[Dict] = None,
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
     ):
@@ -68,11 +206,11 @@ class EncoderDecoder(pl.LightningDataModule):
             past_len: Length of the past sequence (encoder)
             future_len: Length of the future sequence (decoder)
             step_size: Step size for sliding window
-            known_cols: Known columns at prediction time (extracted from d1_dataset if None)
-            unknown_cols: Unknown columns at prediction time (extracted from d1_dataset if None)
             target_normalizer: Type of target normalization
-            categorical_encoders: Categorical encoders
             max_samples_per_group: Maximum samples per group
+
+        Note:
+            known_cols and unknown_cols are automatically inherited from the d1_dataset
         """
         super().__init__()
 
@@ -87,13 +225,12 @@ class EncoderDecoder(pl.LightningDataModule):
         self.num_workers = num_workers
         self.sampler = sampler
         self.target_normalizer = target_normalizer
-        self.categorical_encoders = categorical_encoders or {}
         self.max_samples_per_group = max_samples_per_group
         self.precompute = precompute
 
         # Extract column information from D1 dataset
-        self.known_cols = known_cols or d1_dataset.known_cols
-        self.unknown_cols = unknown_cols or d1_dataset.unknown_cols
+        self.known_cols = d1_dataset.known_cols
+        self.unknown_cols = d1_dataset.unknown_cols
         self.group_cols = d1_dataset.group_cols
         self.target_cols = d1_dataset.target_cols
         self.feature_cols = d1_dataset.feature_cols
@@ -101,13 +238,30 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Separate categorical and continuous columns
         all_feature_cols = self.feature_cols + self.target_cols
-        self.cat_feature_cols = [col for col in all_feature_cols if col in self.cat_cols]
+        # Categorical feature columns can be either:
+        # 1. Feature/target columns that are also in cat_cols, OR
+        # 2. Pure categorical columns (cat_cols that are not in feature/target cols)
+        self.cat_feature_cols = [col for col in all_feature_cols if col in self.cat_cols] + [
+            col for col in self.cat_cols if col not in all_feature_cols
+        ]
         self.cont_feature_cols = [col for col in all_feature_cols if col not in self.cat_cols]
 
         # Build valid windows
         self._build_valid_windows()
 
         logger.info(f"EncoderDecoder initialized with {len(self.valid_windows)} valid windows")
+
+        # Create the main dataset with windowing logic
+        self.dataset = EncoderDecoderDataset(
+            d1_dataset=self.d1_dataset,
+            valid_windows=self.valid_windows,
+            past_len=self.past_len,
+            future_len=self.future_len,
+            target_cols=self.target_cols,
+            cat_cols=self.cat_cols,
+            cont_feature_cols=self.cont_feature_cols,
+            cat_feature_cols=self.cat_feature_cols,
+        )
 
         # Create datasets if precompute is True
         if precompute:
@@ -118,9 +272,9 @@ class EncoderDecoder(pl.LightningDataModule):
             if self.split_config:
                 train_indices, val_indices, test_indices = self._create_splits(self.split_config)
 
-                self.train_dataset = TimeSeriesSubset(self, train_indices)
-                self.val_dataset = TimeSeriesSubset(self, val_indices)
-                self.test_dataset = TimeSeriesSubset(self, test_indices)
+                self.train_dataset = TimeSeriesSubset(self.dataset, train_indices)
+                self.val_dataset = TimeSeriesSubset(self.dataset, val_indices)
+                self.test_dataset = TimeSeriesSubset(self.dataset, test_indices)
 
                 logger.info(
                     f"Split statistics: Train: {len(train_indices)}, "
@@ -128,9 +282,11 @@ class EncoderDecoder(pl.LightningDataModule):
                 )
             else:
                 # Default to all indices as training
-                self.train_dataset = TimeSeriesSubset(self, list(range(len(self.valid_windows))))
-                self.val_dataset = TimeSeriesSubset(self, [])
-                self.test_dataset = TimeSeriesSubset(self, [])
+                self.train_dataset = TimeSeriesSubset(
+                    self.dataset, list(range(len(self.valid_windows)))
+                )
+                self.val_dataset = TimeSeriesSubset(self.dataset, [])
+                self.test_dataset = TimeSeriesSubset(self.dataset, [])
 
     def _build_valid_windows(self):
         """
@@ -209,101 +365,6 @@ class EncoderDecoder(pl.LightningDataModule):
         # In a more sophisticated implementation, you might check for NaN values
         return len(past_indices) == self.past_len and len(future_indices) == self.future_len
 
-    def __len__(self):
-        """Return the number of valid windows."""
-        return len(self.valid_windows)
-
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
-        """
-        Get a sample with encoder-decoder structure.
-
-        Args:
-            idx: Index of the window to retrieve
-
-        Returns:
-            Tuple of (input_dict, target_tensor) where input_dict contains
-            encoder-decoder structure compatible with PyTorch Forecasting
-        """
-        window = self.valid_windows[idx]
-        past_indices = window["past_indices"]
-        future_indices = window["future_indices"]
-
-        # Get past and future data
-        past_samples = [self.d1_dataset[i] for i in past_indices]
-        future_samples = [self.d1_dataset[i] for i in future_indices]
-
-        # Extract features and targets
-        past_features = torch.stack([sample["x"] for sample in past_samples])
-        future_targets = torch.stack([sample["y"] for sample in future_samples])
-
-        # Separate categorical and continuous features
-        encoder_cont = past_features  # All features for now
-        encoder_cat = torch.zeros(self.past_len, len(self.cat_feature_cols))  # Placeholder
-
-        # Future features (known at prediction time)
-        decoder_cont = torch.zeros(self.future_len, len(self.cont_feature_cols))  # Placeholder
-        decoder_cat = torch.zeros(self.future_len, len(self.cat_feature_cols))  # Placeholder
-
-        # Create time indices
-        encoder_time_idx = torch.arange(self.past_len)
-        decoder_time_idx = torch.arange(self.past_len, self.past_len + self.future_len)
-
-        # Create masks (all valid for now)
-        encoder_mask = torch.ones(self.past_len, dtype=torch.bool)
-        decoder_mask = torch.ones(self.future_len, dtype=torch.bool)
-
-        # Sequence lengths
-        encoder_lengths = torch.tensor([self.past_len])
-        decoder_lengths = torch.tensor([self.future_len])
-
-        # Target indices (which features are targets)
-        target_indices = list(range(len(self.target_cols)))
-        idx_target = torch.tensor(target_indices)
-
-        # Static features (placeholder)
-        static_categorical_features = torch.zeros(len(self.cat_cols))
-        static_continuous_features = torch.zeros(0)  # No static continuous features for now
-
-        # Target scale (no scaling for now)
-        target_scale = torch.ones(len(self.target_cols))
-
-        # Build input dictionary with encoder-decoder structure
-        x = {
-            # Encoder data
-            "encoder_cont": encoder_cont,
-            "encoder_cat": encoder_cat,
-            "encoder_lengths": encoder_lengths,
-            "encoder_time_idx": encoder_time_idx,
-            "encoder_mask": encoder_mask,
-            # Decoder data
-            "decoder_cont": decoder_cont,
-            "decoder_cat": decoder_cat,
-            "decoder_lengths": decoder_lengths,
-            "decoder_time_idx": decoder_time_idx,
-            "decoder_mask": decoder_mask,
-            # Static features
-            "static_categorical_features": static_categorical_features,
-            "static_continuous_features": static_continuous_features,
-            # Target information
-            "idx_target": idx_target,
-            "target_scale": target_scale,
-            # Model-compatible keys
-            "x_num_past": encoder_cont,
-            "x_cat_past": encoder_cat,
-            "x_num_future": decoder_cont,
-            "x_cat_future": decoder_cat,
-            "y": future_targets,
-            # Backward compatibility keys
-            "past_features": encoder_cont,
-            "future_targets": future_targets,
-            # Metadata
-            "group_id": window["group_id"],
-            "past_time": [past_samples[i]["past_time"] for i in range(len(past_samples))],
-            "future_time": [future_samples[i]["future_time"] for i in range(len(future_samples))],
-        }
-
-        return x, future_targets
-
     def _create_splits(self, split_config):
         """
         Create train/validation/test splits based on the specified configuration.
@@ -319,7 +380,7 @@ class EncoderDecoder(pl.LightningDataModule):
         if self.split_method == "percentage":
             # Percentage-based split
             train_pct, val_pct, test_pct = split_config
-            total_samples = len(self)
+            total_samples = len(self.valid_windows)
 
             # Calculate indices for each split
             train_end = int(total_samples * train_pct)
@@ -374,7 +435,7 @@ class EncoderDecoder(pl.LightningDataModule):
         Returns:
             Tuple of (train_dataset, val_dataset, test_dataset)
         """
-        total_samples = len(self)
+        total_samples = len(self.dataset)
 
         if method == "temporal":
             # Temporal split - earlier data for training, later for validation/test
@@ -400,9 +461,9 @@ class EncoderDecoder(pl.LightningDataModule):
         )
 
         return (
-            TimeSeriesSubset(self, train_indices),
-            TimeSeriesSubset(self, val_indices),
-            TimeSeriesSubset(self, test_indices),
+            TimeSeriesSubset(self.dataset, train_indices),
+            TimeSeriesSubset(self.dataset, val_indices),
+            TimeSeriesSubset(self.dataset, test_indices),
         )
 
     def setup(self, stage=None):
@@ -410,9 +471,9 @@ class EncoderDecoder(pl.LightningDataModule):
         if self.train_dataset is None and self.split_config:
             train_indices, val_indices, test_indices = self._create_splits(self.split_config)
 
-            self.train_dataset = TimeSeriesSubset(self, train_indices)
-            self.val_dataset = TimeSeriesSubset(self, val_indices)
-            self.test_dataset = TimeSeriesSubset(self, test_indices)
+            self.train_dataset = TimeSeriesSubset(self.dataset, train_indices)
+            self.val_dataset = TimeSeriesSubset(self.dataset, val_indices)
+            self.test_dataset = TimeSeriesSubset(self.dataset, test_indices)
 
             logger.info(
                 f"Setup completed with split statistics: Train: {len(train_indices)}, "
@@ -425,7 +486,9 @@ class EncoderDecoder(pl.LightningDataModule):
 
         if self.train_dataset is None:
             # If no explicit split was provided, use all data for training
-            self.train_dataset = TimeSeriesSubset(self, list(range(len(self.valid_windows))))
+            self.train_dataset = TimeSeriesSubset(
+                self.dataset, list(range(len(self.valid_windows)))
+            )
 
         return DataLoader(
             self.train_dataset,

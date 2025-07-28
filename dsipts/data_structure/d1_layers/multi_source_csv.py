@@ -15,7 +15,6 @@ import torch
 from sklearn.preprocessing import OrdinalEncoder
 
 from .base_d1 import BaseD1Layer
-from .utils import extend_time_df_test_case
 
 # Configure logging
 logging.basicConfig(
@@ -40,11 +39,6 @@ def extend_time_df(df, time_col, freq, group_cols=None, max_length=None):
     """
     if len(df) == 0:
         return df
-
-    # Check if this is a test case and handle it separately
-    test_result = extend_time_df_test_case(df)
-    if not test_result.equals(df):
-        return test_result
 
     # Group by group columns if provided
     if group_cols:
@@ -241,7 +235,57 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     f"Valid options are: {valid_enrich_options}"
                 )
 
-    def _enrich_temporal_features(self, dataset: pd.DataFrame) -> pd.DataFrame:
+    def _parse_and_enrich_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
+        """
+        Parse CSV chunk with robust time column handling and group column validation.
+
+        Args:
+            chunk: Raw DataFrame chunk from CSV
+
+        Returns:
+            Processed DataFrame with datetime parsing and temporal enrichment
+        """
+        if len(chunk) == 0:
+            return chunk
+
+        # Make a copy to avoid modifying the original
+        processed_chunk = chunk.copy()
+
+        # Handle time column parsing
+        if self.time_col and self.time_col in processed_chunk.columns:
+            if not pd.api.types.is_datetime64_any_dtype(processed_chunk[self.time_col]):
+                try:
+                    processed_chunk[self.time_col] = pd.to_datetime(processed_chunk[self.time_col])
+                    logger.debug(f"Converted {self.time_col} to datetime for chunk")
+                except Exception as e:
+                    logger.warning(f"Could not convert {self.time_col} to datetime: {e}")
+                    # Continue processing even if datetime conversion fails
+
+        # Handle group columns - add default if None or empty
+        if not self.group_cols or len(self.group_cols) == 0:
+            # Add a default group column if none specified
+            default_group_col = "_default_group"
+            processed_chunk[default_group_col] = "default"
+            # Update group_cols to include the default
+            if not hasattr(self, "_original_group_cols"):
+                self._original_group_cols = self.group_cols  # Store original
+            self.group_cols = [default_group_col]
+            logger.info(
+                f"Added default group column '{default_group_col}' since no group_cols specified"
+            )
+
+        # Validate that all group columns exist
+        missing_group_cols = [col for col in self.group_cols if col not in processed_chunk.columns]
+        if missing_group_cols:
+            logger.error(f"Missing group columns in data: {missing_group_cols}")
+            raise ValueError(f"Group columns {missing_group_cols} not found in CSV data")
+
+        # Apply temporal enrichment
+        processed_chunk = self._enrich_temporal_features(processed_chunk)
+
+        return processed_chunk
+
+    def _enrich_temporal_features(self, dataset: pd.DataFrame):
         """
         Enrich dataset with temporal categorical variables.
 
@@ -251,36 +295,36 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Dataset enriched with temporal categorical features
         """
-        if not self.enrich_cat:
+        if not self.enrich_cat or self.time_col not in dataset.columns:
             return dataset
 
-        # Check if time column is timestamp
-        if not pd.api.types.is_datetime64_dtype(dataset[self.time_col]):
+        # Make a copy to avoid modifying the original
+        enriched_dataset = dataset.copy()
+
+        # Ensure time column is datetime (should already be handled by _parse_and_enrich_chunk)
+        if not pd.api.types.is_datetime64_any_dtype(enriched_dataset[self.time_col]):
             logger.warning(
-                f"Time column '{self.time_col}' is not datetime type. "
-                f"Temporal enrichment skipped."
+                f"Time column {self.time_col} is not datetime type for temporal enrichment"
             )
             return dataset
 
-        logger.info(f"Enriching dataset with temporal features: {self.enrich_cat}")
+        # Add temporal features
+        time_series = enriched_dataset[self.time_col]
 
-        for enrich_option in self.enrich_cat:
-            if enrich_option == "hour":
-                dataset[enrich_option] = dataset[self.time_col].dt.hour
-            elif enrich_option == "dow":
-                dataset[enrich_option] = dataset[self.time_col].dt.weekday
-            elif enrich_option == "month":
-                dataset[enrich_option] = dataset[self.time_col].dt.month
-            elif enrich_option == "minute":
-                dataset[enrich_option] = dataset[self.time_col].dt.minute
+        for feature in self.enrich_cat:
+            if feature == "hour":
+                enriched_dataset[f"{self.time_col}_hour"] = time_series.dt.hour
+            elif feature == "dow":
+                enriched_dataset[f"{self.time_col}_dow"] = time_series.dt.dayofweek
+            elif feature == "month":
+                enriched_dataset[f"{self.time_col}_month"] = time_series.dt.month
+            elif feature == "minute":
+                enriched_dataset[f"{self.time_col}_minute"] = time_series.dt.minute
+            else:
+                logger.warning(f"Unknown temporal feature: {feature}")
 
-            # Add to categorical and known columns
-            if enrich_option not in self._cat_cols:
-                self._cat_cols.append(enrich_option)
-            if enrich_option not in self._known_cols:
-                self._known_cols.append(enrich_option)
-
-        return dataset
+        logger.debug(f"Added temporal features: {self.enrich_cat}")
+        return enriched_dataset
 
     @property
     def group_cols(self) -> List[str]:
@@ -348,12 +392,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
             if self.memory_efficient:
                 # Process in chunks for memory efficiency
                 for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
-                    chunk = self._enrich_temporal_features(chunk)
+                    chunk = self._parse_and_enrich_chunk(chunk)
                     self._process_chunk(chunk, file_idx, file_path, file_groups)
             else:
                 # Load entire file at once for small files
                 chunk = pd.read_csv(file_path)
-                chunk = self._enrich_temporal_features(chunk)
+                chunk = self._parse_and_enrich_chunk(chunk)
                 self._process_chunk(chunk, file_idx, file_path, file_groups)
 
             # Add all groups from this file to the global mapping
@@ -432,9 +476,33 @@ class MultiSourceTSDataSet(BaseD1Layer):
                             all_values = list(existing_categories) + list(new_values)
                             self.label_encoders[col].fit(np.array(all_values).reshape(-1, 1))
 
+    def _get_categorical_cardinality(self, col):
+        """
+        Get cardinality (number of unique values) for a categorical column.
+        Handles both memory-efficient and non-memory-efficient modes.
+        """
+        if self.data is not None and col in self.data.columns:
+            # Non-memory-efficient mode: data is loaded
+            return len(self.data[col].unique())
+        else:
+            # Memory-efficient mode: need to scan files to get cardinality
+            unique_values = set()
+            for file_group_key in self._group_ids:
+                group_info = self.group_info[file_group_key]
+                file_path = group_info["file_path"]
+
+                # Read just the categorical column from the file
+                try:
+                    df_col = pd.read_csv(file_path, usecols=[col])
+                    unique_values.update(df_col[col].dropna().unique())
+                except (KeyError, pd.errors.ParserError):
+                    # Column doesn't exist in this file, skip
+                    continue
+            return len(unique_values)
+
     def _prepare_metadata(self):
         """
-        Prepare metadata for efficient data access.
+        Prepare dataset metadata including dimensions, column info, and statistics.
         """
         # Create a cumulative index mapping for efficient lookup
         self.cumulative_lengths = [0]
@@ -445,7 +513,52 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Store total dataset length
         self.dataset_length = self.cumulative_lengths[-1]
 
+        # Prepare comprehensive metadata dictionary
+        self.metadata = {
+            # Dataset dimensions
+            "n_targets": len(self.target_cols),
+            "n_features": len(self.feature_cols),
+            "n_categorical": len(self.cat_cols),
+            "n_known_future": len(self.known_cols),
+            "n_unknown_future": len(self.unknown_cols),
+            "n_static": len(self.static_cols) if self.static_cols else 0,
+            # Group information
+            "n_groups": len(set(gk[1] for gk in self._group_ids)),  # Unique groups across files
+            "group_cols": self.group_cols,
+            "original_group_cols": getattr(self, "_original_group_cols", self.group_cols),
+            "has_default_group": hasattr(self, "_original_group_cols"),
+            # Column information
+            "target_cols": self.target_cols,
+            "feature_cols": self.feature_cols,
+            "cat_cols": self.cat_cols,
+            "known_cols": self.known_cols,
+            "unknown_cols": self.unknown_cols,
+            "static_cols": self.static_cols if self.static_cols else [],
+            "time_col": self.time_col,
+            # Temporal enrichment info
+            "enrich_cat": self.enrich_cat if self.enrich_cat else [],
+            "temporal_features": [f"{self.time_col}_{feat}" for feat in (self.enrich_cat or [])]
+            if self.time_col
+            else [],
+            # Dataset structure
+            "total_samples": self.dataset_length,
+            "n_files": len(self.file_paths),
+            "n_file_groups": len(self._group_ids),
+            "memory_efficient": self.memory_efficient,
+            # Categorical feature info (encoders removed - handled in D2 layer)
+            "categorical_columns": self.cat_cols,
+            "categorical_cardinalities": {
+                col: self._get_categorical_cardinality(col) for col in self.cat_cols
+            },
+        }
+
         logger.info(f"Dataset prepared with {self.dataset_length} total samples")
+        logger.info(
+            f"Metadata: {self.metadata['n_targets']} targets, "
+            f"{self.metadata['n_features']} features, "
+            f"{self.metadata['n_categorical']} categorical, "
+            f"{self.metadata['n_groups']} groups"
+        )
 
     def _preload_data(self):
         """
