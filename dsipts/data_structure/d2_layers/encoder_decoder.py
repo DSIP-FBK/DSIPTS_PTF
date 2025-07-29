@@ -156,7 +156,7 @@ class EncoderDecoderDataset:
         return x, y
 
 
-class TimeSeriesSubset:
+class EncoderDecoderSubset:
     """Subset class for dataset splits - delegates to EncoderDecoderDataset.
     Maintains clean separation of concerns, allows for different
     split strategies without modifying the core dataset.
@@ -291,9 +291,9 @@ class EncoderDecoder(pl.LightningDataModule):
             if self.split_config:
                 train_indices, val_indices, test_indices = self._create_splits(self.split_config)
 
-                self.train_dataset = TimeSeriesSubset(self.dataset, train_indices)
-                self.val_dataset = TimeSeriesSubset(self.dataset, val_indices)
-                self.test_dataset = TimeSeriesSubset(self.dataset, test_indices)
+                self.train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
+                self.val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
+                self.test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
                 logger.info(
                     f"Split statistics: Train: {len(train_indices)}, "
@@ -301,11 +301,11 @@ class EncoderDecoder(pl.LightningDataModule):
                 )
             else:
                 # Default to all indices as training
-                self.train_dataset = TimeSeriesSubset(
+                self.train_dataset = EncoderDecoderSubset(
                     self.dataset, list(range(len(self.valid_windows)))
                 )
-                self.val_dataset = TimeSeriesSubset(self.dataset, [])
-                self.test_dataset = TimeSeriesSubset(self.dataset, [])
+                self.val_dataset = EncoderDecoderSubset(self.dataset, [])
+                self.test_dataset = EncoderDecoderSubset(self.dataset, [])
 
     def _build_valid_windows(self):
         """
@@ -441,7 +441,7 @@ class EncoderDecoder(pl.LightningDataModule):
         val_ratio: float = 0.15,
         test_ratio: float = 0.15,
         method: str = "temporal",
-    ) -> Tuple["TimeSeriesSubset", "TimeSeriesSubset", "TimeSeriesSubset"]:
+    ) -> Tuple["EncoderDecoderSubset", "EncoderDecoderSubset", "EncoderDecoderSubset"]:
         """
         Split the dataset into train, validation, and test sets.
 
@@ -480,9 +480,9 @@ class EncoderDecoder(pl.LightningDataModule):
         )
 
         return (
-            TimeSeriesSubset(self.dataset, train_indices),
-            TimeSeriesSubset(self.dataset, val_indices),
-            TimeSeriesSubset(self.dataset, test_indices),
+            EncoderDecoderSubset(self.dataset, train_indices),
+            EncoderDecoderSubset(self.dataset, val_indices),
+            EncoderDecoderSubset(self.dataset, test_indices),
         )
 
     def setup(self, stage=None):
@@ -490,9 +490,9 @@ class EncoderDecoder(pl.LightningDataModule):
         if self.train_dataset is None and self.split_config:
             train_indices, val_indices, test_indices = self._create_splits(self.split_config)
 
-            self.train_dataset = TimeSeriesSubset(self.dataset, train_indices)
-            self.val_dataset = TimeSeriesSubset(self.dataset, val_indices)
-            self.test_dataset = TimeSeriesSubset(self.dataset, test_indices)
+            self.train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
+            self.val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
+            self.test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
             logger.info(
                 f"Setup completed with split statistics: Train: {len(train_indices)}, "
@@ -505,7 +505,7 @@ class EncoderDecoder(pl.LightningDataModule):
 
         if self.train_dataset is None:
             # If no explicit split was provided, use all data for training
-            self.train_dataset = TimeSeriesSubset(
+            self.train_dataset = EncoderDecoderSubset(
                 self.dataset, list(range(len(self.valid_windows)))
             )
 
