@@ -176,7 +176,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.weights = weights
 
         # Handle group columns (can be single column or multiple)
-        if isinstance(group_cols, str):
+        # Handle None, empty list, or NaN values
+        if group_cols is None or (isinstance(group_cols, list) and len(group_cols) == 0):
+            self._group_cols = []
+            logger.info("No group columns provided, using default grouping")
+        elif isinstance(group_cols, str):
             self._group_cols = [group_cols]
         else:
             self._group_cols = group_cols
@@ -546,11 +550,18 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "n_file_groups": len(self._group_ids),
             "memory_efficient": self.memory_efficient,
             # Categorical feature info (encoders removed - handled in D2 layer)
-            "categorical_columns": self.cat_cols,
-            "categorical_cardinalities": {
-                col: self._get_categorical_cardinality(col) for col in self.cat_cols
-            },
         }
+
+        # Only include categorical keys if categorical columns exist
+        if self.cat_cols and len(self.cat_cols) > 0:
+            self.metadata.update(
+                {
+                    "categorical_columns": self.cat_cols,
+                    "categorical_cardinalities": {
+                        col: self._get_categorical_cardinality(col) for col in self.cat_cols
+                    },
+                }
+            )
 
         logger.info(f"Dataset prepared with {self.dataset_length} total samples")
         logger.info(

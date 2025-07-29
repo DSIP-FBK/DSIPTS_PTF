@@ -127,10 +127,20 @@ class EncoderDecoderDataset:
             future_cat = torch.zeros(self.future_len, len(self.cat_feature_cols), dtype=torch.long)
             x["x_cat_future"] = future_cat
 
-        # Add static features only if present
-        if len(self.cat_cols) > 0:
-            static_cat = torch.zeros(len(self.cat_cols))
+        # Add categorical features only if they exist
+        if self.cat_feature_cols and len(self.cat_feature_cols) > 0:
+            # Only include categorical keys if categorical columns exist
+            static_cat = torch.zeros(len(self.cat_feature_cols))
             x["static_categorical_features"] = static_cat
+
+            # Add encoder_cat only if categorical features exist
+            x["encoder_cat"] = torch.zeros((self.past_len, len(self.cat_feature_cols)))
+            x["x_cat_past"] = x["encoder_cat"]
+
+            # Add decoder_cat only if categorical features exist
+            if self.future_len > 0:
+                x["decoder_cat"] = torch.zeros((self.future_len, len(self.cat_feature_cols)))
+                x["x_cat_future"] = x["decoder_cat"]
 
         # Backward compatibility keys (kept for existing code)
         x["past_features"] = past_features
@@ -231,10 +241,16 @@ class EncoderDecoder(pl.LightningDataModule):
         # Extract column information from D1 dataset
         self.known_cols = d1_dataset.known_cols
         self.unknown_cols = d1_dataset.unknown_cols
-        self.group_cols = d1_dataset.group_cols
+        self.group_cols = d1_dataset.group_cols or []
         self.target_cols = d1_dataset.target_cols
         self.feature_cols = d1_dataset.feature_cols
-        self.cat_cols = d1_dataset.cat_cols or []
+
+        # Handle potentially None or empty categorical columns
+        try:
+            self.cat_cols = d1_dataset.cat_cols if d1_dataset.cat_cols else []
+        except (AttributeError, TypeError):
+            logger.warning("No categorical columns found in D1 dataset or cat_cols is None")
+            self.cat_cols = []
 
         # Separate categorical and continuous columns
         all_feature_cols = self.feature_cols + self.target_cols
