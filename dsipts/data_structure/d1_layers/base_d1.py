@@ -46,62 +46,6 @@ class BaseD1Layer(ABC):
         pass
 
     @property
-    @abstractmethod
-    def group_cols(self) -> Union[str, List[str]]:
-        """Get the group columns."""
-        pass
-
-    @property
-    @abstractmethod
-    def target_cols(self) -> List[str]:
-        """Get the target columns."""
-        pass
-
-    @property
-    @abstractmethod
-    def feature_cols(self) -> List[str]:
-        """Get the feature columns."""
-        pass
-
-    @property
-    @abstractmethod
-    def cat_cols(self) -> Optional[List[str]]:
-        """Get the categorical columns."""
-        pass
-
-    @property
-    @abstractmethod
-    def known_cols(self) -> Optional[List[str]]:
-        """Get the known future columns."""
-        pass
-
-    @property
-    @abstractmethod
-    def unknown_cols(self) -> Optional[List[str]]:
-        """Get the unknown future columns."""
-        pass
-
-
-class BaseD1LayerWithDefaults(BaseD1Layer):
-    """
-    Base D1 layer with default property implementations.
-
-    Subclasses can inherit from this class and set the private attributes
-    (_group_cols, _target_cols, etc.) to get default property behavior.
-    """
-
-    def __init__(self):
-        """Initialize the base D1 layer with defaults."""
-        super().__init__()
-        # Initialize default attributes - subclasses should override these
-        self._group_cols = []
-        self._target_cols = []
-        self._feature_cols = []
-        self._cat_cols = []
-        self._known_cols = []
-        self._unknown_cols = []
-
-    @property
     def group_cols(self) -> Union[str, List[str]]:
         """Get the group columns."""
         return self._group_cols

@@ -157,7 +157,10 @@ class EncoderDecoderDataset:
 
 
 class TimeSeriesSubset:
-    """Subset class for dataset splits - delegates to EncoderDecoderDataset."""
+    """Subset class for dataset splits - delegates to EncoderDecoderDataset.
+    Maintains clean separation of concerns, allows for different
+    split strategies without modifying the core dataset.
+    """
 
     def __init__(self, dataset: EncoderDecoderDataset, indices: List[int]):
         self.dataset = dataset
