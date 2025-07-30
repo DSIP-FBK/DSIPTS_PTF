@@ -42,7 +42,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
     def __init__(
         self,
         file_paths: List[str],
-        group_cols: Union[str, List[str]],
+        group_cols: Union[str, List[str]],  #
         time_col: str,
         feature_cols: List[str],
         target_cols: List[str],
@@ -97,18 +97,21 @@ class MultiSourceTSDataSet(BaseD1Layer):
         else:
             self._group_cols = group_cols
 
-        # Feature configuration
+        # Initialize attributes
         self._feature_cols = feature_cols
         self._target_cols = target_cols
-        self.static_cols = static_cols or []
+        self._group_cols = group_cols
+        self._time_col = time_col
+        self._static_cols = static_cols
         self._cat_cols = cat_cols or []
-        self.num_cols = num_cols or []
-
-        # Known/unknown columns configuration
-        self._known_cols = known_cols or self._feature_cols.copy()
-        self._unknown_cols = unknown_cols or self._target_cols.copy()
-
-        # Temporal categorical enrichment
+        self._num_cols = num_cols or []
+        self._known_cols = known_cols or list(
+            self._feature_cols
+        )  # Create a new list instead of copying
+        self._unknown_cols = unknown_cols or list(
+            self._target_cols
+        )  # Create a new list instead of copying
+        self._enrich_cat = enrich_cat
         self.enrich_cat = enrich_cat or []
         self._validate_enrich_cat()
 
@@ -153,60 +156,36 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     def _parse_and_enrich_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """
-        Parse CSV chunk with robust time column handling and group column validation.
+        Parse and enrich a chunk of data.
 
         Args:
-            chunk: Raw DataFrame chunk from CSV
+            chunk: DataFrame chunk to process
 
         Returns:
-            Processed DataFrame with datetime parsing and temporal enrichment
+            Processed DataFrame chunk
         """
-        if len(chunk) == 0:
-            return chunk
+        # Process the chunk directly without copying
+        processed_chunk = chunk
 
-        # Make a copy to avoid modifying the original
-        processed_chunk = chunk.copy()
+        # Convert time column to datetime if it exists
+        if self.time_col in processed_chunk.columns:
+            try:
+                processed_chunk[self.time_col] = pd.to_datetime(processed_chunk[self.time_col])
+            except Exception as e:
+                logger.warning(f"Failed to convert {self.time_col} to datetime: {e}")
 
-        # Handle time column parsing
-        if self.time_col and self.time_col in processed_chunk.columns:
-            if not pd.api.types.is_datetime64_any_dtype(processed_chunk[self.time_col]):
-                try:
-                    processed_chunk[self.time_col] = pd.to_datetime(processed_chunk[self.time_col])
-                    logger.debug(f"Converted {self.time_col} to datetime for chunk")
-                except Exception as e:
-                    logger.warning(f"Could not convert {self.time_col} to datetime: {e}")
-                    # Continue processing even if datetime conversion fails
-
-        # Handle group columns - add default if None or empty
-        if not self.group_cols or len(self.group_cols) == 0:
-            # Add a default group column if none specified
-            default_group_col = "_default_group"
-            processed_chunk[default_group_col] = "default"
-            # Update group_cols to include the default
-            if not hasattr(self, "_original_group_cols"):
-                self._original_group_cols = self.group_cols  # Store original
-            self.group_cols = [default_group_col]
-            logger.info(
-                f"Added default group column '{default_group_col}' since no group_cols specified"
-            )
-
-        # Validate that all group columns exist
-        missing_group_cols = [col for col in self.group_cols if col not in processed_chunk.columns]
-        if missing_group_cols:
-            logger.error(f"Missing group columns in data: {missing_group_cols}")
-            raise ValueError(f"Group columns {missing_group_cols} not found in CSV data")
-
-        # Apply temporal enrichment
-        processed_chunk = self._enrich_temporal_features(processed_chunk)
+        # Enrich with temporal features if requested
+        if self.enrich_cat and self.time_col in processed_chunk.columns:
+            processed_chunk = self._enrich_temporal_features(processed_chunk)
 
         return processed_chunk
 
-    def _enrich_temporal_features(self, dataset: pd.DataFrame):
+    def _enrich_temporal_features(self, dataset):
         """
-        Enrich dataset with temporal categorical variables.
+        Enrich dataset with temporal categorical features.
 
         Args:
-            dataset: Input dataframe with time column
+            dataset: DataFrame to enrich
 
         Returns:
             Dataset enriched with temporal categorical features
@@ -214,8 +193,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if not self.enrich_cat or self.time_col not in dataset.columns:
             return dataset
 
-        # Make a copy to avoid modifying the original
-        enriched_dataset = dataset.copy()
+        # Process the dataset directly without copying
+        enriched_dataset = dataset
 
         # Ensure time column is datetime (should already be handled by _parse_and_enrich_chunk)
         if not pd.api.types.is_datetime64_any_dtype(enriched_dataset[self.time_col]):
@@ -227,19 +206,41 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Add temporal features
         time_series = enriched_dataset[self.time_col]
 
+        # Track newly added categorical columns
+        new_cat_cols = []
+
         for feature in self.enrich_cat:
             if feature == "hour":
-                enriched_dataset[f"{self.time_col}_hour"] = time_series.dt.hour
+                col_name = "hour"
+                enriched_dataset[col_name] = time_series.dt.hour
+                new_cat_cols.append(col_name)
             elif feature == "dow":
-                enriched_dataset[f"{self.time_col}_dow"] = time_series.dt.dayofweek
+                col_name = "dow"
+                enriched_dataset[col_name] = time_series.dt.dayofweek
+                new_cat_cols.append(col_name)
             elif feature == "month":
-                enriched_dataset[f"{self.time_col}_month"] = time_series.dt.month
+                col_name = "month"
+                enriched_dataset[col_name] = time_series.dt.month
+                new_cat_cols.append(col_name)
             elif feature == "minute":
-                enriched_dataset[f"{self.time_col}_minute"] = time_series.dt.minute
+                col_name = "minute"
+                enriched_dataset[col_name] = time_series.dt.minute
+                new_cat_cols.append(col_name)
             else:
                 logger.warning(f"Unknown temporal feature: {feature}")
 
-        logger.debug(f"Added temporal features: {self.enrich_cat}")
+        # Update categorical columns list with the new temporal features
+        if new_cat_cols:
+            if self._cat_cols is None:
+                self._cat_cols = []
+            self._cat_cols.extend(new_cat_cols)
+
+            # Also add to known_cols since these are always known
+            if self._known_cols is not None:
+                self._known_cols.extend(new_cat_cols)
+
+            logger.info(f"Added temporal categorical features: {new_cat_cols}")
+
         return enriched_dataset
 
     @property
@@ -337,33 +338,72 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if len(chunk) == 0:
             return
 
-        # Group by the group columns
-        for group_key, group_data in chunk.groupby(self.group_cols):
-            # Convert single values to tuples for consistency
-            if not isinstance(group_key, tuple):
-                group_key = (group_key,)
+        # Create composite group keys if multiple group columns
+        if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
+            # Create a temporary composite key column for groupby
+            chunk["_composite_group_key"] = chunk[self.group_cols].apply(
+                lambda x: "_".join(x.astype(str)), axis=1
+            )
 
-            # Create file-specific group identifier
-            file_group_key = (file_idx, group_key)
-            file_groups.add(file_group_key)
+            # Group by the composite key
+            for group_key_str, group_data in chunk.groupby("_composite_group_key"):
+                # Store the original values as a tuple for reference
+                original_values = tuple(group_data[self.group_cols].iloc[0].values)
 
-            # Update group info
-            if file_group_key not in self.group_info:
-                self.group_info[file_group_key] = {
-                    "file_path": file_path,
-                    "file_idx": file_idx,
-                    "group_key": group_key,
-                    "length": 0,
-                    "start_idx": self.total_length,
-                }
+                # Use the composite string as the group key for efficiency
+                group_key = (group_key_str,)
 
-            # Update length
-            group_length = len(group_data)
-            self.group_info[file_group_key]["length"] += group_length
-            self.total_length += group_length
+                # Create file-specific group identifier
+                file_group_key = (file_idx, group_key)
+                file_groups.add(file_group_key)
 
-            # Update categorical encoders
-            self._update_encoders(group_data)
+                # Update group info with both composite key and original values
+                if file_group_key not in self.group_info:
+                    self.group_info[file_group_key] = {
+                        "file_path": file_path,
+                        "file_idx": file_idx,
+                        "group_key": group_key,
+                        "original_values": original_values,  # Store original column values
+                        "group_columns": self.group_cols,  # Store column names
+                        "length": 0,
+                        "start_idx": self.total_length,
+                    }
+
+                # Update length
+                group_length = len(group_data)
+                self.group_info[file_group_key]["length"] += group_length
+                self.total_length += group_length
+
+                # Update categorical encoders
+                self._update_encoders(group_data)
+        else:
+            # Original behavior for single group column
+            for group_key, group_data in chunk.groupby(self.group_cols):
+                # Convert single values to tuples for consistency
+                if not isinstance(group_key, tuple):
+                    group_key = (group_key,)
+
+                # Create file-specific group identifier
+                file_group_key = (file_idx, group_key)
+                file_groups.add(file_group_key)
+
+                # Update group info
+                if file_group_key not in self.group_info:
+                    self.group_info[file_group_key] = {
+                        "file_path": file_path,
+                        "file_idx": file_idx,
+                        "group_key": group_key,
+                        "length": 0,
+                        "start_idx": self.total_length,
+                    }
+
+                # Update length
+                group_length = len(group_data)
+                self.group_info[file_group_key]["length"] += group_length
+                self.total_length += group_length
+
+                # Update categorical encoders
+                self._update_encoders(group_data)
 
     def _update_encoders(self, data):
         """
@@ -437,50 +477,65 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "n_categorical": len(self.cat_cols),
             "n_known_future": len(self.known_cols),
             "n_unknown_future": len(self.unknown_cols),
-            "n_static": len(self.static_cols) if self.static_cols else 0,
-            # Group information
-            "n_groups": len(set(gk[1] for gk in self._group_ids)),  # Unique groups across files
-            "group_cols": self.group_cols,
-            "original_group_cols": getattr(self, "_original_group_cols", self.group_cols),
-            "has_default_group": hasattr(self, "_original_group_cols"),
-            # Column information
             "target_cols": self.target_cols,
             "feature_cols": self.feature_cols,
-            "cat_cols": self.cat_cols,
-            "known_cols": self.known_cols,
-            "unknown_cols": self.unknown_cols,
-            "static_cols": self.static_cols if self.static_cols else [],
+            "n_groups": len(self._group_ids),
+            # Column types
             "time_col": self.time_col,
-            # Temporal enrichment info
+            "known_cols": self.known_cols if self.known_cols else [],
+            "unknown_cols": self.unknown_cols if self.unknown_cols else [],
             "enrich_cat": self.enrich_cat if self.enrich_cat else [],
             "temporal_features": [f"{self.time_col}_{feat}" for feat in (self.enrich_cat or [])]
             if self.time_col
             else [],
-            # Dataset structure
-            "total_samples": self.dataset_length,
-            "n_files": len(self.file_paths),
-            "n_file_groups": len(self._group_ids),
-            "memory_efficient": self.memory_efficient,
-            # Categorical feature info (encoders removed - handled in D2 layer)
         }
 
-        # Only include categorical keys if categorical columns exist
+        # Add categorical information to metadata only if categorical columns exist
         if self.cat_cols and len(self.cat_cols) > 0:
-            self.metadata.update(
-                {
-                    "categorical_columns": self.cat_cols,
-                    "categorical_cardinalities": {
-                        col: self._get_categorical_cardinality(col) for col in self.cat_cols
-                    },
-                }
-            )
+            self.metadata["categorical_columns"] = self.cat_cols
+            self.metadata["categorical_cardinalities"] = {
+                col: len(self.label_encoders[col].categories_[0])
+                for col in self.cat_cols
+                if col in self.label_encoders
+            }
+
+        # Add group information to metadata
+        if self.group_cols:
+            self.metadata["group_cols"] = self.group_cols
+
+            # adding group mapping information for composite keys
+            if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
+                # mapping from composite key to integer id
+                unique_groups = [info["group_key"][0] for info in self.group_info.values()]
+                group_to_int = {group: idx for idx, group in enumerate(set(unique_groups))}
+
+                # we create reverse mapping from integer ID to original values
+                reverse_mapping = {}
+                for file_group_key, info in self.group_info.items():
+                    group_key = info["group_key"][0]
+                    if "original_values" in info:
+                        reverse_mapping[group_to_int[group_key]] = {
+                            "composite_key": group_key,
+                            "original_values": dict(zip(self.group_cols, info["original_values"])),
+                        }
+
+                # add mappings to metadata
+                self.metadata["group_mapping"] = group_to_int
+                self.metadata["reverse_mapping"] = reverse_mapping
+                self.metadata["n_groups"] = len(group_to_int)
+
+        # Add dataset structure information
+        self.metadata["total_samples"] = self.dataset_length
+        self.metadata["n_files"] = len(self.file_paths)
+        self.metadata["n_file_groups"] = len(self._group_ids)
+        self.metadata["memory_efficient"] = self.memory_efficient
 
         logger.info(f"Dataset prepared with {self.dataset_length} total samples")
         logger.info(
-            f"Metadata: {self.metadata['n_targets']} targets, "
-            f"{self.metadata['n_features']} features, "
-            f"{self.metadata['n_categorical']} categorical, "
-            f"{self.metadata['n_groups']} groups"
+            f"Metadata: {self.metadata.get('n_targets', 0)} targets, "
+            f"{self.metadata.get('n_features', 0)} features, "
+            f"{self.metadata.get('n_categorical', 0)} categorical, "
+            f"{self.metadata.get('n_groups', 0)} groups"
         )
 
     def _preload_data(self):
@@ -512,21 +567,27 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     def _extract_group_data(self, df, group_key):
         """
-        Extract data for a specific group from a dataframe.
+        Extract data for a specific group from a DataFrame.
 
         Args:
-            df: Full dataframe
-            group_key: Tuple of group values
+            df: DataFrame to extract from
+            group_key: Group key to extract
 
         Returns:
-            DataFrame containing only the specified group's data
+            DataFrame containing only data for the specified group
         """
-        # Create filter condition
-        mask = pd.Series(True, index=df.index)
-        for i, col in enumerate(self.group_cols):
-            mask &= df[col] == group_key[i]
+        # Create a mask for the group
+        if isinstance(self.group_cols, list):
+            # Multiple group columns
+            mask = pd.Series(True, index=df.index)
+            for i, col in enumerate(self.group_cols):
+                mask &= df[col] == group_key[i]
+        else:
+            # Single group column
+            mask = df[self.group_cols] == group_key[0]
 
-        return df[mask].copy()
+        # Return the filtered data without copying
+        return df[mask]
 
     def _process_group_data(self, group_data):
         """
@@ -590,35 +651,32 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     def __len__(self) -> int:
         """
-        Return the total number of samples in the dataset.
+        Return the number of groups in the dataset.
 
         Returns:
-            int: Total number of samples across all groups and files
+            Number of unique groups
         """
-        return self.dataset_length
+        return len(self._group_ids)
 
     def __getitem__(self, idx: int) -> Dict[str, any]:
         """
-        Get a sample from the dataset.
+        Get all data for a specific group.
 
         Args:
-            idx: Global index of the sample to retrieve
+            idx: Group index (0 to number_of_groups-1)
 
         Returns:
-            Dictionary containing the sample data
+            Dictionary containing all data for the specified group
         """
-        # Find which group this index belongs to
-        group_idx = 0
-        for i, cum_length in enumerate(self.cumulative_lengths[1:]):
-            if idx < cum_length:
-                group_idx = i
-                break
+        if idx >= len(self._group_ids):
+            raise IndexError(
+                f"Group index {idx} out of range. Available groups: {len(self._group_ids)}"
+            )
 
-        # Get the file-group key and local index within that group
-        file_group_key = self._group_ids[group_idx]
-        local_idx = idx - self.cumulative_lengths[group_idx]
+        # Get the file-group key for this group index
+        file_group_key = self._group_ids[idx]
 
-        # Get the data
+        # Get all data for this group
         if self.memory_efficient:
             # Load data on demand
             group_data = self._load_group_data_on_demand(file_group_key)
@@ -626,26 +684,54 @@ class MultiSourceTSDataSet(BaseD1Layer):
             # Use preloaded data
             group_data = self.data_cache[file_group_key]
 
-        # Get the specific row
-        if local_idx >= len(group_data):
-            raise IndexError(
-                f"Local index {local_idx} out of range for group with {len(group_data)} samples"
-            )
+        # Sort by time if time column exists
+        if self.time_col in group_data.columns:
+            group_data = group_data.sort_values(by=self.time_col)
 
-        row = group_data.iloc[local_idx]
+        # Get group ID - for composite keys, use integer mapping if available
+        group_key = file_group_key[1]
+        if (
+            isinstance(self.group_cols, list)
+            and len(self.group_cols) > 1
+            and "group_mapping" in self.metadata
+        ):
+            # Use the integer mapping for efficiency
+            group_id = self.metadata["group_mapping"].get(group_key[0], group_key)
+        else:
+            group_id = group_key
 
-        # Prepare the sample
+        # Extract all features and targets for this group
+        features = []
+        targets = []
+        time_indices = []
+
+        for _, row in group_data.iterrows():
+            features.append(self._extract_features(row))
+            targets.append(self._extract_targets(row))
+            if self.time_col in row:
+                time_indices.append(row[self.time_col])
+
+        # Stack into tensors
+        x = torch.stack(features) if features else torch.empty(0, len(self.feature_cols))
+        y = torch.stack(targets) if targets else torch.empty(0, len(self.target_cols))
+
+        # Prepare the group sample
         sample = {
-            "x": self._extract_features(row),
-            "y": self._extract_targets(row),
-            "group_id": file_group_key[1],  # Just the group key, not file index
-            "past_time": row[self.time_col] if self.time_col in row else None,
-            "future_time": row[self.time_col] if self.time_col in row else None,
+            "x": x,  # All features for this group [seq_len, n_features]
+            "y": y,  # All targets for this group [seq_len, n_targets]
+            "group_id": group_id,  # Group identifier
+            "past_time": time_indices,  # All time indices for this group
+            "future_time": time_indices,  # Same as past_time for now
+            "seq_len": len(group_data),  # Length of the sequence
         }
 
-        # Add static features if available
-        if self.static_cols:
-            sample["static_features"] = self._extract_static_features(row)
+        # Add static features if available (same for all rows in group)
+        if self.static_cols and len(group_data) > 0:
+            sample["static_features"] = self._extract_static_features(group_data.iloc[0])
+
+        # Add categorical encoders to metadata if they exist
+        if hasattr(self, "categorical_encoders") and self.categorical_encoders:
+            sample["encoders"] = self.categorical_encoders
 
         return sample
 
