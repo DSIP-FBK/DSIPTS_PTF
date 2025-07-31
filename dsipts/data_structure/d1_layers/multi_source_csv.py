@@ -112,17 +112,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.enrich_cat = enrich_cat or []
         self._validate_enrich_cat()
 
-        # Add temporal categorical features to cat_cols and known_cols during initialization
-        if self.enrich_cat:
-            if self._cat_cols is None:
-                self._cat_cols = []
-            self._cat_cols.extend(self.enrich_cat)
-
-            # Also add to known_cols since these are always known
-            if self._known_cols is not None:
-                self._known_cols.extend(self.enrich_cat)
-
-            logger.info(f"Added temporal categorical features to columns: {self.enrich_cat}")
+        # Flag to track if temporal features have been added to categorical columns
+        self._is_file_read = False
 
         # If num_cols not specified, infer from feature_cols and cat_cols
         if not self.num_cols:
@@ -222,6 +213,19 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     logger.error(
                         f"I can not automatically enrich column {column}. Please contact the developers or add it manually to your dataset."  # noqa: E501
                     )
+
+        # Add temporal categorical features to cat_cols and known_cols only once
+        if self.enrich_cat and not self._is_file_read:
+            if self._cat_cols is None:
+                self._cat_cols = []
+            self._cat_cols.extend(self.enrich_cat)
+
+            # Also add to known_cols since these are always known
+            if self._known_cols is not None:
+                self._known_cols.extend(self.enrich_cat)
+
+            self._is_file_read = True
+            logger.info(f"Added temporal categorical features to columns: {self.enrich_cat}")
 
         return dataset
 
@@ -683,6 +687,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Extract all features and targets for this group efficiently
         # Use vectorized operations instead of slow iterrows()
         if len(group_data) == 0:
+            logger.warning(f"Empty group data found for group {group_id}.")  # noqa
             x = torch.empty(0, len(self.feature_cols), dtype=torch.float32)
             y = torch.empty(0, len(self.target_cols), dtype=torch.float32)
             time_indices = []
@@ -733,31 +738,3 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Extract and process group data
         group_data = self._extract_group_data(df, group_key)
         return self._process_group_data(group_data)
-
-    def _extract_features(self, row):
-        """
-        Extract feature values from a row.
-
-        Args:
-            row: Pandas Series representing a single row
-
-        Returns:
-            Tensor containing feature values
-        """
-        # Use vectorized operations for better performance
-        feature_values = row[self.feature_cols].fillna(0.0).astype(float).values
-        return torch.tensor(feature_values, dtype=torch.float32)
-
-    def _extract_targets(self, row):
-        """
-        Extract target values from a row.
-
-        Args:
-            row: Pandas Series representing a single row
-
-        Returns:
-            Tensor containing target values
-        """
-        # Use vectorized operations for better performance
-        target_values = row[self.target_cols].fillna(0.0).astype(float).values
-        return torch.tensor(target_values, dtype=torch.float32)
