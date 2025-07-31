@@ -46,7 +46,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         time_col: str,
         feature_cols: List[str],
         target_cols: List[str],
-        static_cols: Optional[List[str]] = None,
         cat_cols: Optional[List[str]] = None,
         num_cols: Optional[List[str]] = None,
         known_cols: Optional[List[str]] = None,
@@ -65,7 +64,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             time_col: Column containing time/date information
             feature_cols: Columns to use as features (X)
             target_cols: Columns to use as targets (y)
-            static_cols: Columns with static (non-time-varying) features
             cat_cols: Categorical columns that need encoding
             num_cols: Numerical columns (if None, all non-categorical
                 columns are treated as numerical)
@@ -102,7 +100,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._target_cols = target_cols
         self._group_cols = group_cols
         self._time_col = time_col
-        self._static_cols = static_cols
         self._cat_cols = cat_cols or []
         self._num_cols = num_cols or []
         self._known_cols = known_cols or list(
@@ -115,9 +112,21 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.enrich_cat = enrich_cat or []
         self._validate_enrich_cat()
 
+        # Add temporal categorical features to cat_cols and known_cols during initialization
+        if self.enrich_cat:
+            if self._cat_cols is None:
+                self._cat_cols = []
+            self._cat_cols.extend(self.enrich_cat)
+
+            # Also add to known_cols since these are always known
+            if self._known_cols is not None:
+                self._known_cols.extend(self.enrich_cat)
+
+            logger.info(f"Added temporal categorical features to columns: {self.enrich_cat}")
+
         # If num_cols not specified, infer from feature_cols and cat_cols
         if not self.num_cols:
-            all_cols = self._feature_cols + self._target_cols + self.static_cols
+            all_cols = self._feature_cols + self._target_cols
             self.num_cols = [c for c in all_cols if c not in self._cat_cols]
 
         # Internal state
@@ -164,21 +173,19 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Processed DataFrame chunk
         """
-        # Process the chunk directly without copying
-        processed_chunk = chunk
 
         # Convert time column to datetime if it exists
-        if self.time_col in processed_chunk.columns:
+        if self.time_col in chunk.columns:
             try:
-                processed_chunk[self.time_col] = pd.to_datetime(processed_chunk[self.time_col])
+                chunk[self.time_col] = pd.to_datetime(chunk[self.time_col])
             except Exception as e:
                 logger.warning(f"Failed to convert {self.time_col} to datetime: {e}")
 
         # Enrich with temporal features if requested
-        if self.enrich_cat and self.time_col in processed_chunk.columns:
-            processed_chunk = self._enrich_temporal_features(processed_chunk)
+        if self.enrich_cat and self.time_col in chunk.columns:
+            chunk = self._enrich_temporal_features(chunk)
 
-        return processed_chunk
+        return chunk
 
     def _enrich_temporal_features(self, dataset):
         """
@@ -200,40 +207,21 @@ class MultiSourceTSDataSet(BaseD1Layer):
             )
             return dataset
 
-        # Add temporal features
-        time_series = dataset[self.time_col]
-
-        # Track newly added categorical columns
-        new_cat_cols = []
-
-        # Mapping of feature names to datetime attributes
-        feature_mapping = {
-            "hour": time_series.dt.hour,
-            "dow": time_series.dt.dayofweek,
-            "month": time_series.dt.month,
-            "minute": time_series.dt.minute,
-        }
-
-        for feature in self.enrich_cat:
-            if feature in feature_mapping:
-                dataset[feature] = feature_mapping[feature]
-                new_cat_cols.append(feature)
+        # Add temporal features directly without mapping dict
+        for column in self.enrich_cat:
+            if column == "hour":
+                dataset[column] = dataset[self.time_col].dt.hour
+            elif column == "dow":
+                dataset[column] = dataset[self.time_col].dt.dayofweek
+            elif column == "month":
+                dataset[column] = dataset[self.time_col].dt.month
+            elif column == "minute":
+                dataset[column] = dataset[self.time_col].dt.minute
             else:
-                logger.warning(f"Unknown temporal feature: {feature}")
-
-        # Update categorical columns list with the new temporal features (only once)
-        if new_cat_cols and not hasattr(self, "_temporal_features_added"):
-            if self._cat_cols is None:
-                self._cat_cols = []
-            self._cat_cols.extend(new_cat_cols)
-
-            # Also add to known_cols since these are always known
-            if self._known_cols is not None:
-                self._known_cols.extend(new_cat_cols)
-
-            # Mark that temporal features have been added
-            self._temporal_features_added = True
-            logger.info(f"Added temporal categorical features: {new_cat_cols}")
+                if column not in dataset.columns:
+                    logger.error(
+                        f"I can not automatically enrich column {column}. Please contact the developers or add it manually to your dataset."  # noqa: E501
+                    )
 
         return dataset
 
@@ -553,9 +541,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
             # Extract group data
             df = self.data_cache[file_path]
             group_data = self._extract_group_data(df, group_key)
+            group_data = self._process_group_data(group_data)
 
             # Store processed group data
-            self.data_cache[file_group_key] = self._process_group_data(group_data)
+            self.data_cache[file_group_key] = group_data
 
         logger.info("Data preloading completed")
 
@@ -593,23 +582,20 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Processed DataFrame
         """
-        # Make a copy to avoid modifying original data
-        processed_data = group_data.copy()
-
         # Apply categorical encodings
         for col in self.cat_cols:
-            if col in processed_data.columns and col in self.label_encoders:
+            if col in group_data.columns and col in self.label_encoders:
                 # Handle NaN values
-                non_null_mask = processed_data[col].notna()
+                non_null_mask = group_data[col].notna()
                 if non_null_mask.any():
                     # Transform non-null values
                     values_to_transform = (
-                        processed_data.loc[non_null_mask, col].astype(str).values.reshape(-1, 1)
+                        group_data.loc[non_null_mask, col].astype(str).values.reshape(-1, 1)
                     )
                     encoded_values = self.label_encoders[col].transform(values_to_transform)
-                    processed_data.loc[non_null_mask, col] = encoded_values.flatten()
+                    group_data.loc[non_null_mask, col] = encoded_values.flatten()
 
-        return processed_data
+        return group_data
 
     def _infer_frequency(self, time_col_data):
         """
@@ -724,21 +710,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "seq_len": len(group_data),  # Length of the sequence
         }
 
-        # Add static features if available (same for all rows in group)
-        if self.static_cols and len(group_data) > 0:
-            sample["static_features"] = self._extract_static_features(group_data.iloc[0])
-
-        # Add categorical encoders to metadata if they exist
-        # (for all categorical columns, including groups)
-        if hasattr(self, "categorical_encoders") and self.categorical_encoders:
-            sample["encoders"] = self.categorical_encoders
-
-        # Also include label encoders if they exist
-        if hasattr(self, "label_encoders") and self.label_encoders:
-            if "encoders" not in sample:
-                sample["encoders"] = {}
-            sample["encoders"].update(self.label_encoders)
-
         return sample
 
     def _load_group_data_on_demand(self, file_group_key):
@@ -790,20 +761,3 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Use vectorized operations for better performance
         target_values = row[self.target_cols].fillna(0.0).astype(float).values
         return torch.tensor(target_values, dtype=torch.float32)
-
-    def _extract_static_features(self, row):
-        """
-        Extract static feature values from a row.
-
-        Args:
-            row: Pandas Series representing a single row
-
-        Returns:
-            Tensor containing static feature values
-        """
-        # Use vectorized operations for better performance
-        if not self.static_cols:
-            return torch.tensor([], dtype=torch.float32)
-
-        static_values = row[self.static_cols].fillna(0.0).astype(float).values
-        return torch.tensor(static_values, dtype=torch.float32)
