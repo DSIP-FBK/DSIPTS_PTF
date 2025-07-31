@@ -193,44 +193,36 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if not self.enrich_cat or self.time_col not in dataset.columns:
             return dataset
 
-        # Process the dataset directly without copying
-        enriched_dataset = dataset
-
         # Ensure time column is datetime (should already be handled by _parse_and_enrich_chunk)
-        if not pd.api.types.is_datetime64_any_dtype(enriched_dataset[self.time_col]):
+        if not pd.api.types.is_datetime64_any_dtype(dataset[self.time_col]):
             logger.warning(
                 f"Time column {self.time_col} is not datetime type for temporal enrichment"
             )
             return dataset
 
         # Add temporal features
-        time_series = enriched_dataset[self.time_col]
+        time_series = dataset[self.time_col]
 
         # Track newly added categorical columns
         new_cat_cols = []
 
+        # Mapping of feature names to datetime attributes
+        feature_mapping = {
+            "hour": time_series.dt.hour,
+            "dow": time_series.dt.dayofweek,
+            "month": time_series.dt.month,
+            "minute": time_series.dt.minute,
+        }
+
         for feature in self.enrich_cat:
-            if feature == "hour":
-                col_name = "hour"
-                enriched_dataset[col_name] = time_series.dt.hour
-                new_cat_cols.append(col_name)
-            elif feature == "dow":
-                col_name = "dow"
-                enriched_dataset[col_name] = time_series.dt.dayofweek
-                new_cat_cols.append(col_name)
-            elif feature == "month":
-                col_name = "month"
-                enriched_dataset[col_name] = time_series.dt.month
-                new_cat_cols.append(col_name)
-            elif feature == "minute":
-                col_name = "minute"
-                enriched_dataset[col_name] = time_series.dt.minute
-                new_cat_cols.append(col_name)
+            if feature in feature_mapping:
+                dataset[feature] = feature_mapping[feature]
+                new_cat_cols.append(feature)
             else:
                 logger.warning(f"Unknown temporal feature: {feature}")
 
-        # Update categorical columns list with the new temporal features
-        if new_cat_cols:
+        # Update categorical columns list with the new temporal features (only once)
+        if new_cat_cols and not hasattr(self, "_temporal_features_added"):
             if self._cat_cols is None:
                 self._cat_cols = []
             self._cat_cols.extend(new_cat_cols)
@@ -239,9 +231,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
             if self._known_cols is not None:
                 self._known_cols.extend(new_cat_cols)
 
+            # Mark that temporal features have been added
+            self._temporal_features_added = True
             logger.info(f"Added temporal categorical features: {new_cat_cols}")
 
-        return enriched_dataset
+        return dataset
 
     @property
     def group_cols(self) -> List[str]:
@@ -700,20 +694,25 @@ class MultiSourceTSDataSet(BaseD1Layer):
         else:
             group_id = group_key
 
-        # Extract all features and targets for this group
-        features = []
-        targets = []
-        time_indices = []
+        # Extract all features and targets for this group efficiently
+        # Use vectorized operations instead of slow iterrows()
+        if len(group_data) == 0:
+            x = torch.empty(0, len(self.feature_cols), dtype=torch.float32)
+            y = torch.empty(0, len(self.target_cols), dtype=torch.float32)
+            time_indices = []
+        else:
+            # Extract features using vectorized operations
+            feature_values = group_data[self.feature_cols].values
+            x = torch.tensor(feature_values, dtype=torch.float32)
 
-        for _, row in group_data.iterrows():
-            features.append(self._extract_features(row))
-            targets.append(self._extract_targets(row))
-            if self.time_col in row:
-                time_indices.append(row[self.time_col])
+            # extracting targets using vectorized operations
+            target_values = group_data[self.target_cols].values
+            y = torch.tensor(target_values, dtype=torch.float32)
 
-        # Stack into tensors
-        x = torch.stack(features) if features else torch.empty(0, len(self.feature_cols))
-        y = torch.stack(targets) if targets else torch.empty(0, len(self.target_cols))
+            # Extract time indices
+            time_indices = (
+                group_data[self.time_col].tolist() if self.time_col in group_data.columns else []
+            )
 
         # Prepare the group sample
         sample = {
@@ -730,8 +729,15 @@ class MultiSourceTSDataSet(BaseD1Layer):
             sample["static_features"] = self._extract_static_features(group_data.iloc[0])
 
         # Add categorical encoders to metadata if they exist
+        # (for all categorical columns, including groups)
         if hasattr(self, "categorical_encoders") and self.categorical_encoders:
             sample["encoders"] = self.categorical_encoders
+
+        # Also include label encoders if they exist
+        if hasattr(self, "label_encoders") and self.label_encoders:
+            if "encoders" not in sample:
+                sample["encoders"] = {}
+            sample["encoders"].update(self.label_encoders)
 
         return sample
 
@@ -767,18 +773,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Tensor containing feature values
         """
-        features = []
-        for col in self.feature_cols:
-            if col in row:
-                value = row[col]
-                if pd.isna(value):
-                    features.append(0.0)  # or some other default
-                else:
-                    features.append(float(value))
-            else:
-                features.append(0.0)
-
-        return torch.tensor(features, dtype=torch.float32)
+        # Use vectorized operations for better performance
+        feature_values = row[self.feature_cols].fillna(0.0).astype(float).values
+        return torch.tensor(feature_values, dtype=torch.float32)
 
     def _extract_targets(self, row):
         """
@@ -790,18 +787,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Tensor containing target values
         """
-        targets = []
-        for col in self.target_cols:
-            if col in row:
-                value = row[col]
-                if pd.isna(value):
-                    targets.append(0.0)  # or some other default
-                else:
-                    targets.append(float(value))
-            else:
-                targets.append(0.0)
-
-        return torch.tensor(targets, dtype=torch.float32)
+        # Use vectorized operations for better performance
+        target_values = row[self.target_cols].fillna(0.0).astype(float).values
+        return torch.tensor(target_values, dtype=torch.float32)
 
     def _extract_static_features(self, row):
         """
@@ -813,15 +801,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Tensor containing static feature values
         """
-        static_features = []
-        for col in self.static_cols:
-            if col in row:
-                value = row[col]
-                if pd.isna(value):
-                    static_features.append(0.0)
-                else:
-                    static_features.append(float(value))
-            else:
-                static_features.append(0.0)
+        # Use vectorized operations for better performance
+        if not self.static_cols:
+            return torch.tensor([], dtype=torch.float32)
 
-        return torch.tensor(static_features, dtype=torch.float32)
+        static_values = row[self.static_cols].fillna(0.0).astype(float).values
+        return torch.tensor(static_values, dtype=torch.float32)
