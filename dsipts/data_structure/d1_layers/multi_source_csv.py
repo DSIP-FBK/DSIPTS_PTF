@@ -42,10 +42,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
     def __init__(
         self,
         file_paths: List[str],
-        group_cols: Union[str, List[str]],  #
-        time_col: str,
-        feature_cols: List[str],
-        target_cols: List[str],
+        group_cols: Optional[Union[str, List[str]]] = None,
+        time_col: str = None,
+        feature_cols: Optional[List[str]] = None,
+        target_cols: List[str] = None,
         cat_cols: Optional[List[str]] = None,
         num_cols: Optional[List[str]] = None,
         known_cols: Optional[List[str]] = None,
@@ -95,19 +95,18 @@ class MultiSourceTSDataSet(BaseD1Layer):
         else:
             self._group_cols = group_cols
 
-        # Initialize attributes
-        self._feature_cols = feature_cols
-        self._target_cols = target_cols
-        self._group_cols = group_cols
+        # Initialize attributes with proper defaults
+        self._feature_cols = feature_cols or []
+        self._target_cols = target_cols or []
         self._time_col = time_col
         self._cat_cols = cat_cols or []
         self._num_cols = num_cols or []
-        self._known_cols = known_cols or list(
-            self._feature_cols
-        )  # Create a new list instead of copying
-        self._unknown_cols = unknown_cols or list(
-            self._target_cols
-        )  # Create a new list instead of copying
+
+        # Handle group columns properly (already set self._group_cols above)
+
+        # Set known and unknown columns with proper handling for None values
+        self._known_cols = known_cols or list(self._feature_cols) if self._feature_cols else []
+        self._unknown_cols = unknown_cols or list(self._target_cols) if self._target_cols else []
         self._enrich_cat = enrich_cat
         self.enrich_cat = enrich_cat or []
         self._validate_enrich_cat()
@@ -116,9 +115,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._is_file_read = False
 
         # If num_cols not specified, infer from feature_cols and cat_cols
-        if not self.num_cols:
+        if not self._num_cols:
             all_cols = self._feature_cols + self._target_cols
-            self.num_cols = [c for c in all_cols if c not in self._cat_cols]
+            self._num_cols = [c for c in all_cols if c not in self._cat_cols]
 
         # Internal state
         self.memory_efficient = memory_efficient
@@ -164,19 +163,48 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Processed DataFrame chunk
         """
+        # If time_col is missing, create one as integer range and set as time_col
+        if self.time_col not in chunk.columns:
+            logger.info(
+                f"Time column '{self.time_col}' not found."
+                f"Creating 'time' column as integer range."
+            )
+            chunk["time"] = range(len(chunk))
+            self.time_col = "time"
 
-        # Convert time column to datetime if it exists
-        if self.time_col in chunk.columns:
+        # Now, handle the time column type
+        if not pd.api.types.is_datetime64_any_dtype(chunk[self.time_col]):
             try:
                 chunk[self.time_col] = pd.to_datetime(chunk[self.time_col])
+                logger.info(f"Converted '{self.time_col}' to datetime.")
             except Exception as e:
-                logger.warning(f"Failed to convert {self.time_col} to datetime: {e}")
+                # If conversion fails, check if int/float
+                if pd.api.types.is_integer_dtype(
+                    chunk[self.time_col]
+                ) or pd.api.types.is_float_dtype(chunk[self.time_col]):
+                    logger.info(
+                        f"Time column '{self.time_col}' is numeric (int/float)."
+                        f"Proceeding as numeric time."
+                    )
+                else:
+                    logger.warning(
+                        f"Time column '{self.time_col}' cant be converted to datetime."
+                        f"Its not numerical, Temporal enrichment skipped! Error: {e}"
+                    )
 
-        # Enrich with temporal features if requested
-        if self.enrich_cat and self.time_col in chunk.columns:
+        # Enrich with temporal features if requested and time_col is datetime
+        if self.enrich_cat and pd.api.types.is_datetime64_any_dtype(chunk[self.time_col]):
             chunk = self._enrich_temporal_features(chunk)
 
-        return chunk
+        # Always sort by time_col
+        chunk = chunk.sort_values(by=self.time_col).reset_index(drop=True)
+
+        # Set of mandatory columns (cat, num, target)
+        mandatory_cols = set(self.cat_cols or [])
+        mandatory_cols.update(self.num_cols or [])
+        mandatory_cols.update(self.target_cols or [])
+        filtered_cols = [col for col in mandatory_cols if col in chunk.columns]
+        return chunk[filtered_cols]
 
     def _enrich_temporal_features(self, dataset):
         """
@@ -237,27 +265,27 @@ class MultiSourceTSDataSet(BaseD1Layer):
     @property
     def target_cols(self) -> List[str]:
         """Get the target columns."""
-        return self._target_cols
+        return self._target_cols or []
 
     @property
     def feature_cols(self) -> List[str]:
         """Get the feature columns."""
-        return self._feature_cols
+        return self._feature_cols or []
 
     @property
     def cat_cols(self) -> Optional[List[str]]:
         """Get the categorical columns."""
-        return self._cat_cols
+        return self._cat_cols or []
 
     @property
     def known_cols(self) -> Optional[List[str]]:
         """Get the known future columns."""
-        return self._known_cols
+        return self._known_cols or []
 
     @property
     def unknown_cols(self) -> Optional[List[str]]:
         """Get the unknown future columns."""
-        return self._unknown_cols
+        return self._unknown_cols or []
 
     def _process_files(self):
         """
@@ -693,11 +721,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
             time_indices = []
         else:
             # Extract features using vectorized operations
-            feature_values = group_data[self.feature_cols].values
+            feature_values = group_data[self._feature_cols].values
             x = torch.tensor(feature_values, dtype=torch.float32)
 
             # extracting targets using vectorized operations
-            target_values = group_data[self.target_cols].values
+            target_values = group_data[self._target_cols].values
             y = torch.tensor(target_values, dtype=torch.float32)
 
             # Extract time indices
