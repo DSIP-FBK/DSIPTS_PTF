@@ -31,6 +31,7 @@ class EncoderDecoderDataset:
         cat_cols: List[str] = None,
         cont_feature_cols: List[str] = None,
         cat_feature_cols: List[str] = None,
+        include_target_in_decoder: bool = False,
     ):
         """Initialize the encoder-decoder dataset.
 
@@ -43,6 +44,7 @@ class EncoderDecoderDataset:
             cat_cols: Categorical column names
             cont_feature_cols: Continuous feature column names
             cat_feature_cols: Categorical feature column names
+            include_target_in_decoder: If True, includes target in decoder (for select models)
         """
         self.d1_dataset = d1_dataset
         self.valid_windows = valid_windows
@@ -51,6 +53,7 @@ class EncoderDecoderDataset:
         self.target_cols = target_cols or []
         self.cat_cols = cat_cols or []
         self.cont_feature_cols = cont_feature_cols or []
+        self.include_target_in_decoder = include_target_in_decoder
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
             try:
@@ -101,6 +104,79 @@ class EncoderDecoderDataset:
         x["y"] = future_targets  # Target values for training
         x["idx_target"] = torch.tensor(list(range(len(self.target_cols))))  # Target indices
 
+        # Create index mappings for known/unknown numerical and categorical columns
+        # These help downstream models locate specific features within tensor inputs
+
+        # Initialize index mappings
+        known_num_cols = getattr(self.d1_dataset, "known_cols", []) or []
+        unknown_num_cols = getattr(self.d1_dataset, "unknown_cols", []) or []
+        cat_cols = getattr(self.d1_dataset, "cat_cols", []) or []
+        num_cols = getattr(self.d1_dataset, "num_cols", []) or []
+
+        # Filter to only include numerical columns
+        known_num_cols = [col for col in known_num_cols if col not in cat_cols]
+        unknown_num_cols = [col for col in unknown_num_cols if col not in cat_cols]
+
+        # Create index mappings
+        idx_known_num = []
+        idx_unknown_num = []
+        idx_known_cat = []
+        idx_unknown_cat = []
+
+        # Map numerical columns to their indices
+        for i, col in enumerate(num_cols):
+            if col in known_num_cols:
+                idx_known_num.append(i)
+            elif col in unknown_num_cols:
+                idx_unknown_num.append(i)
+
+        # Map categorical columns to their indices
+        for i, col in enumerate(cat_cols):
+            if col in known_num_cols:
+                idx_known_cat.append(i)
+            elif col in unknown_num_cols:
+                idx_unknown_cat.append(i)
+            else:
+                # If not explicitly marked as known/unknown, treat as unknown
+                idx_unknown_cat.append(i)
+
+        # Add index mappings to output
+        x["idx_known_num"] = (
+            torch.tensor(idx_known_num, dtype=torch.long)
+            if idx_known_num
+            else torch.zeros(0, dtype=torch.long)
+        )  # noqa
+        x["idx_unknown_num"] = (
+            torch.tensor(idx_unknown_num, dtype=torch.long)
+            if idx_unknown_num
+            else torch.zeros(0, dtype=torch.long)
+        )  # noqa
+        x["idx_known_cat"] = (
+            torch.tensor(idx_known_cat, dtype=torch.long)
+            if idx_known_cat
+            else torch.zeros(0, dtype=torch.long)
+        )  # noqa
+        x["idx_unknown_cat"] = (
+            torch.tensor(idx_unknown_cat, dtype=torch.long)
+            if idx_unknown_cat
+            else torch.zeros(0, dtype=torch.long)
+        )  # noqa
+
+        # Get categorical cardinality list (ordered to match categorical past features)
+        categorical_cardinality_past = []
+        if hasattr(self.d1_dataset, "label_encoders") and self.cat_feature_cols:
+            for col in self.cat_feature_cols:
+                if col in self.d1_dataset.label_encoders:
+                    # Get number of categories from the encoder
+                    cardinality = len(self.d1_dataset.label_encoders[col].categories_[0])
+                    categorical_cardinality_past.append(cardinality)
+                else:
+                    # Default cardinality if encoder not available
+                    categorical_cardinality_past.append(1)
+
+        # Add categorical cardinality to metadata
+        x["categorical_cardinality_past"] = categorical_cardinality_past
+
         # Add categorical features only if present
         if len(self.cat_feature_cols) > 0:
             # Extract categorical features from past samples
@@ -119,6 +195,11 @@ class EncoderDecoderDataset:
         if len(self.cont_feature_cols) > 0 and hasattr(self, "_has_future_features"):
             future_cont = torch.zeros(self.future_len, len(self.cont_feature_cols))
             x["x_num_future"] = future_cont
+
+        # Include target in decoder part if requested (for select models)
+        if self.include_target_in_decoder and self.future_len > 0:
+            # Add target to decoder numerical features
+            x["decoder_target"] = future_targets
 
         # Add future categorical features only if present
         if len(self.cat_feature_cols) > 0:
@@ -204,12 +285,13 @@ class EncoderDecoder(pl.LightningDataModule):
         step_size: int = 1,
         min_valid_length: Optional[int] = None,
         split_method: str = "percentage",
-        split_config: Optional[tuple] = None,
+        split_config: Optional[Tuple] = None,
         num_workers: int = 0,
         sampler: Optional[Sampler] = None,
         target_normalizer: Optional[str] = None,
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
+        include_target_in_decoder: bool = False,
     ):
         """
         Initialize the EncoderDecoder.
@@ -218,12 +300,17 @@ class EncoderDecoder(pl.LightningDataModule):
             d1_dataset: Any D1 layer implementation (BaseD1Layer subclass)
             past_len: Length of the past sequence (encoder)
             future_len: Length of the future sequence (decoder)
+            batch_size: Batch size for dataloaders
             step_size: Step size for sliding window
-            target_normalizer: Type of target normalization
+            min_valid_length: Minimum required length for a valid window
+            split_method: Method for splitting data ('percentage' or 'group')
+            split_config: Configuration for splits
+            num_workers: Number of workers for dataloaders
+            sampler: Optional sampler for training dataloader
+            target_normalizer: Optional normalizer for targets
             max_samples_per_group: Maximum samples per group
-
-        Note:
-            known_cols and unknown_cols are automatically inherited from the d1_dataset
+            precompute: Whether to precompute valid windows
+            include_target_in_decoder: If True, include target in decoder part (for some models)
         """
         super().__init__()
 
@@ -276,10 +363,10 @@ class EncoderDecoder(pl.LightningDataModule):
             valid_windows=self.valid_windows,
             past_len=self.past_len,
             future_len=self.future_len,
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            cont_feature_cols=self.cont_feature_cols,
-            cat_feature_cols=self.cat_feature_cols,
+            target_cols=self.d1_dataset.target_cols,
+            cat_cols=getattr(self.d1_dataset, "cat_cols", None),
+            cont_feature_cols=getattr(self.d1_dataset, "num_cols", None),
+            include_target_in_decoder=include_target_in_decoder,
         )
 
         # Create datasets if precompute is True
