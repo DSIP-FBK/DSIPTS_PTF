@@ -149,11 +149,16 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Infer feature columns automatically from file headers and other specifications.
 
         Logic:
-        1. If known_cols is specified, use it as the primary source for feature columns
-        2. Otherwise, read the first CSV file to get all available columns
-        3. Exclude special columns: time_col, group_cols, target_cols, weights
-        4. Include columns from num_cols and cat_cols if specified
-        5. Filter out any enriched temporal features that will be added later
+        1. If known_cols is specified, use it as the
+        primary source for feature columns
+        2. Otherwise, if num_cols or cat_cols are specified,
+        use them along with group_cols, target_cols, and weights
+        3. Otherwise, read the first CSV file to get
+        all available columns
+        4. Include all columns except temporal enrichment
+        columns that will be added later
+        5. Ensure group_cols, num_cols, cat_cols,
+        target_cols, and weights are included
 
         Returns:
             List of inferred feature column names
@@ -163,11 +168,44 @@ class MultiSourceTSDataSet(BaseD1Layer):
             logger.info("Using known_cols as feature_cols")
             return list(self._known_cols)
 
-        # Priority 2: If num_cols or cat_cols are specified, use them (excluding targets)
+        # Priority 2: If num_cols or cat_cols are specified,
+        # use them along with group_cols, target_cols, and weights
         if self._num_cols or self._cat_cols:
-            logger.info("Inferring feature_cols from num_cols and cat_cols")
-            all_specified_cols = list(set(self._num_cols + self._cat_cols))
-            feature_cols = [col for col in all_specified_cols if col not in self._target_cols]
+            logger.info(
+                "Inferring feature_cols from num_cols,"
+                "cat_cols, group_cols, target_cols, and weights"
+            )
+            feature_cols = []
+
+            # Add numerical columns
+            if self._num_cols:
+                feature_cols.extend(self._num_cols)
+
+            # Add categorical columns
+            if self._cat_cols:
+                feature_cols.extend(self._cat_cols)
+
+            # Add group columns
+            if self._group_cols:
+                if isinstance(self._group_cols, str):
+                    feature_cols.append(self._group_cols)
+                else:
+                    feature_cols.extend(self._group_cols)
+
+            # Add target columns
+            feature_cols.extend(self._target_cols)
+
+            # Add weights column
+            if self.weights:
+                feature_cols.append(self.weights)
+
+            # Remove duplicates while preserving order
+            feature_cols = list(dict.fromkeys(feature_cols))
+
+            logger.info(
+                f"Inferred {len(feature_cols)} feature columns"
+                "from specified columns: {feature_cols}"
+            )
             return feature_cols
 
         # Priority 3: Read from file headers and infer automatically
@@ -178,34 +216,14 @@ class MultiSourceTSDataSet(BaseD1Layer):
             sample_df = pd.read_csv(first_file, nrows=1)
             all_columns = list(sample_df.columns)
 
-            # Define special columns to exclude from features
-            special_columns = set()
-
-            # Add time column
-            if self.time_col:
-                special_columns.add(self.time_col)
-
-            # Add group columns
-            if self._group_cols:
-                if isinstance(self._group_cols, str):
-                    special_columns.add(self._group_cols)
-                else:
-                    special_columns.update(self._group_cols)
-
-            # Add target columns
-            special_columns.update(self._target_cols)
-
-            # Add weights column
-            if self.weights:
-                special_columns.add(self.weights)
-
-            # Add potential temporal enrichment columns (they will be added later)
+            # Exclude only potential temporal enrichment columns (they will be added later)
+            exclude_columns = set()
             if self.enrich_cat and self.time_col:
                 for enrich_option in self.enrich_cat:
-                    special_columns.add(enrich_option)  # Simple names like 'hour', 'dow'
+                    exclude_columns.add(enrich_option)  # Simple names like 'hour', 'dow'
 
-            # Filter out special columns to get feature columns
-            feature_cols = [col for col in all_columns if col not in special_columns]
+            # Include all columns except excluded ones
+            feature_cols = [col for col in all_columns if col not in exclude_columns]
 
             logger.info(
                 f"Inferred {len(feature_cols)} feature columns from file headers: {feature_cols}"
