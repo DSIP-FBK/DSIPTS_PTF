@@ -769,14 +769,13 @@ class MultiSourceTSDataSet(BaseD1Layer):
             # Column names
             "target_cols": self.target_cols,
             "feature_cols": self.feature_cols,
-            # Feature indices (NEW: lists of indices instead of counts)
+            # Feature indices
             "idx_categorical": cat_indices,
             "idx_known_future": known_indices,
             "idx_unknown_future": unknown_indices,
             "idx_targets": target_indices,
             # Group information
             "n_groups": len(self._group_ids),
-            "n_future_groups": groups_per_file,  # NEW: list of groups per file
             # Column types and temporal information
             "time_col": self.time_col,
             "known_cols": self.known_cols if self.known_cols else [],
@@ -812,8 +811,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         f"  - {col}: {n_categories} categories {categories[:5].tolist()}{'...' if n_categories > 5 else ''}"  # noqa: E501
                     )
 
-            self.metadata["categorical_cardinalities"] = cardinalities
-            self.metadata["categorical_mappings"] = categorical_mappings  # NEW: detailed mappings
+            self.metadata["categorical_cardinalities"] = []
+            self.metadata["categorical_mappings"] = categorical_mappings
+            # Populate simple lists for easier access
+            for col_name, mapping in categorical_mappings.items():
+                self.metadata["categorical_cardinalities"].append(mapping["cardinality"])
 
         # Add group information to metadata
         self.metadata["group_cols"] = self.group_cols
@@ -976,7 +978,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 mask = df[col] == group_key[0]
                 logger.debug(f"Filtering on single group column in list: {col}")
             else:
-                # Empty list case - return all data
+                # Empty list case
                 logger.debug("Empty group_cols list - returning all data")
                 return df
         else:
