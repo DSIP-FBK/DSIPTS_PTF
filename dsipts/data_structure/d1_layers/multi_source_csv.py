@@ -1114,14 +1114,24 @@ class MultiSourceTSDataSet(BaseD1Layer):
         else:
             # Separate numerical and categorical features
             num_feature_cols = [col for col in self._feature_cols if col in self._num_cols]
+            cat_feature_cols = [col for col in self._feature_cols if col in self._cat_cols]
 
             # Extract numerical features using vectorized operations
             if num_feature_cols:
                 num_feature_values = group_data[num_feature_cols].values
-                x = torch.tensor(num_feature_values, dtype=torch.float32)
+                x_num = torch.tensor(num_feature_values, dtype=torch.float32)
             else:
                 # If no numerical features, create empty tensor with correct shape
-                x = torch.empty((len(group_data), 0), dtype=torch.float32)
+                x_num = torch.empty((len(group_data), 0), dtype=torch.float32)
+
+            # Extract categorical features if they exist
+            if cat_feature_cols:
+                cat_feature_values = group_data[cat_feature_cols].values
+                x_cat = torch.tensor(cat_feature_values, dtype=torch.long)
+                # Combine numerical and categorical features
+                x = torch.cat([x_num, x_cat.float()], dim=-1)
+            else:
+                x = x_num
 
             # extracting targets using vectorized operations
             target_values = group_data[self._target_cols].values
