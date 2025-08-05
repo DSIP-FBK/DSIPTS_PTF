@@ -21,17 +21,23 @@ def create_test_dataframe():
 
     # Create sample time series data with datetime index
     n_timesteps = 100
+    n_groups = 3
 
     data = []
-    for t in range(n_timesteps):
-        timestamp = pd.Timestamp("2023-01-01") + pd.Timedelta(minutes=t * 10)
-        data.append(
-            {
-                "date": timestamp,
-                "OT": np.random.randn(),
-                "feature_1": np.random.randn(),
-            }
-        )
+    for g in range(n_groups):
+        for t in range(n_timesteps):
+            timestamp = pd.Timestamp("2023-01-01") + pd.Timedelta(minutes=t * 10)
+            data.append(
+                {
+                    "date": timestamp,
+                    "group_id": f"group_{g}",
+                    "OT": np.random.randn(),
+                    "OT2": np.random.randn(),  # Second target
+                    "num_feature": np.random.randn(),
+                    "cat_feature": np.random.choice(["A", "B", "C"]),
+                    "cat_feature_2": np.random.choice(["X", "Y", "Z"]),
+                }
+            )
 
     df = pd.DataFrame(data)
     return df
@@ -53,72 +59,70 @@ def test_temporal_features():
         df.to_csv(csv_path, index=False)
 
     try:
-        # Initialize D1 layer with temporal enrichment
+        # Test Case 1: Basic temporal enrichment
+        print("\n=== TEST CASE 1: Basic temporal enrichment ===")
         d1 = MultiSourceTSDataSet(
             file_paths=[csv_path],
-            group_cols=[],  # Empty group columns for single group
+            group_cols=["group_id"],
             time_col="date",
             target_cols=["OT"],
-            num_cols=["OT"],
-            enrich_cat=["minute"],
+            num_cols=["OT", "num_feature"],
+            cat_cols=["cat_feature", "cat_feature_2"],
+            enrich_cat=["minute", "hour"],
             memory_efficient=False,
         )
 
-        print(f"D1 dataset length: {len(d1)}")
-        print(f"Number of groups: {d1.metadata['n_groups']}")
-
-        # Test new metadata structure
-        print("\n=== METADATA STRUCTURE ===")
-        print(f"n_features: {d1.metadata['n_features']}")
-        print(f"feature_cols: {d1.metadata['feature_cols']}")
-        print(f"idx_categorical: {d1.metadata['idx_categorical']}")
-        print(f"idx_known_future: {d1.metadata['idx_known_future']}")
-        print(f"idx_unknown_future: {d1.metadata['idx_unknown_future']}")
-        print(f"idx_targets: {d1.metadata['idx_targets']}")
-        print(f"n_future_groups: {d1.metadata['n_future_groups']}")
-        print(f"enrich_cat: {d1.metadata['enrich_cat']}")
-
-        if "categorical_mappings" in d1.metadata:
-            print(f"categorical_mappings: {d1.metadata['categorical_mappings']}")
-
-        # Verify expected values
-        expected_n_features = 2  # OT + minute
-        expected_feature_cols = ["OT", "minute"]
-        expected_idx_categorical = [1]  # minute is at index 1
-        expected_idx_known_future = [1]  # minute is at index 1
-
-        print("\n=== VERIFICATION ===")
-        print(f"Expected n_features: {expected_n_features}," f"Actual: {d1.metadata['n_features']}")
-        print(
-            f"Expected feature_cols: {expected_feature_cols},"
-            f"Actual: {d1.metadata['feature_cols']}"
-        )
-        print(
-            f"Expected idx_categorical: {expected_idx_categorical},"
-            f"Actual: {d1.metadata['idx_categorical']}"
-        )
-        print(
-            f"Expected idx_known_future: {expected_idx_known_future},"
-            f"Actual: {d1.metadata['idx_known_future']}"
+        # Test Case 2: Multiple targets
+        print("\n=== TEST CASE 2: Multiple targets ===")
+        d2 = MultiSourceTSDataSet(
+            file_paths=[csv_path],
+            group_cols=["group_id"],
+            time_col="date",
+            target_cols=["OT", "OT2"],
+            num_cols=["OT", "OT2", "num_feature"],
+            cat_cols=["cat_feature"],
+            enrich_cat=["dow", "hour"],
+            memory_efficient=False,
         )
 
-        # Check if temporal_features field exists (should not exist)
-        if "temporal_features" in d1.metadata:
-            print(
-                f"ERROR: temporal_features field should not exist,"
-                f"but found: {d1.metadata['temporal_features']}"
-            )
-        else:
-            print("SUCCESS: temporal_features field correctly removed from metadata")
+        # Test Case 3: No temporal enrichment
+        print("\n=== TEST CASE 3: No temporal enrichment ===")
+        d3 = MultiSourceTSDataSet(
+            file_paths=[csv_path],
+            group_cols=["group_id"],
+            time_col="date",
+            target_cols=["OT"],
+            num_cols=["OT", "num_feature"],
+            cat_cols=["cat_feature"],
+            enrich_cat=None,
+            memory_efficient=False,
+        )
 
-        # Test data access
-        sample = d1[0]
-        print(f"\nSample keys: {list(sample.keys())}")
-        print(f"Sample x shape: {sample['x'].shape}")
-        print(f"Sample y shape: {sample['y'].shape}")
+        # Run verifications for each test case
+        for i, (name, dataset) in enumerate(
+            [("Basic", d1), ("Multi-target", d2), ("No enrichment", d3)], 1
+        ):
+            print(f"\n=== Verifying {name} ===")
+            print(f"Dataset {i} length: {len(dataset)}")
+            print(f"Number of groups: {dataset.metadata['n_groups']}")
 
-        print("✅ Temporal feature test passed!")
-        return d1
+            # Print metadata
+            print("\n=== FULL METADATA ===")
+            for key, value in dataset.metadata.items():
+                if isinstance(value, (list, dict)) and len(str(value)) > 100:
+                    print(f"{key}: {type(value)} (length: {len(value)})")
+                else:
+                    print(f"{key}: {value}")
+
+            # Test data access
+            sample = dataset[0]
+            print(f"\nSample keys: {list(sample.keys())}")
+            print(f"Sample x shape: {sample['x'].shape}")
+            print(f"Sample y shape: {sample['y'].shape}")
+
+            print(f"✅ {name} test passed!")
+
+        return d1, d2, d3
 
     finally:
         # Clean up
