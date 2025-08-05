@@ -116,6 +116,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._time_col = time_col
         self._cat_cols = cat_cols or []
         self._num_cols = num_cols or []
+        self._enrich_cat = enrich_cat
+        self.enrich_cat = enrich_cat or []
 
         # Handle group columns properly (already set self._group_cols above)
 
@@ -125,8 +127,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Infer feature_cols automatically from headers and other specifications
         self._feature_cols = self._infer_feature_columns()
-        self._enrich_cat = enrich_cat
-        self.enrich_cat = enrich_cat or []
         self._validate_enrich_cat()
 
         # Flag to track if temporal features have been added to categorical columns
@@ -167,14 +167,21 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Priority 1: Use known_cols if specified
         if self._known_cols:
-            logger.info(f"Using known_cols as feature columns: {self._known_cols}")
-            return list(self._known_cols)
+            feature_cols = list(self._known_cols)
+            # Add temporal features if specified
+            if self.enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+            logger.info(f"Using known_cols as feature columns: {feature_cols}")
+            return feature_cols
 
         # Priority 2: Use num_cols + cat_cols if specified
         if self._num_cols or self._cat_cols:
             feature_cols = list(set(self._num_cols + self._cat_cols))
             # Include target columns in features (they can be both features and targets)
-            feature_cols.extend([col for col in self._target_cols if col not in feature_cols])
+            feature_cols = list(dict.fromkeys(feature_cols + self._target_cols))
+            # Add temporal features if specified
+            if self.enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
             logger.info(
                 f"Using num_cols + cat_cols + target_cols as feature columns: {feature_cols}"
             )
@@ -208,6 +215,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Include all columns except special ones
         feature_cols = [col for col in all_columns if col not in special_columns]
+        # Add temporal features if specified
+        if self.enrich_cat:
+            feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
 
         logger.info(f"Inferred feature columns from headers: {feature_cols}")
         logger.info(f"Excluded special columns: {list(special_columns)}")
@@ -679,9 +689,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info(f"Known Future Columns: {self.known_cols}")
         logger.info(f"Unknown Future Columns: {self.unknown_cols}")
         logger.info(f"Group Columns: {self.group_cols}")
-        logger.info(
-            f"Temporal Features: {[f'{self.time_col}_{feat}' for feat in (self.enrich_cat or [])]}"
-        )
         logger.info(f"Memory Efficient Mode: {self.memory_efficient}")
         logger.info("-" * 80 + "\n")
 
@@ -744,8 +751,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Calculate groups per file
         groups_per_file = []
-        for file_path in self.file_paths:
-            file_groups = [key for key in self._group_ids if key[0] == file_path]
+        for file_idx in range(len(self.file_paths)):
+            file_groups = [key for key in self._group_ids if key[0] == file_idx]
             groups_per_file.append([key[1] for key in file_groups])  # Extract group IDs
 
         logger.info(f"Groups per file: {groups_per_file}")
@@ -775,9 +782,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "known_cols": self.known_cols if self.known_cols else [],
             "unknown_cols": self.unknown_cols if self.unknown_cols else [],
             "enrich_cat": self.enrich_cat if self.enrich_cat else [],
-            "temporal_features": [f"{self.time_col}_{feat}" for feat in (self.enrich_cat or [])]
-            if self.time_col
-            else [],
         }
 
         # Add categorical information to metadata only if categorical columns exist
