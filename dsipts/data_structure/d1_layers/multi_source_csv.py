@@ -846,6 +846,16 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.metadata["reverse_mapping"] = reverse_mapping
             self.metadata["n_groups"] = len(group_to_int)
 
+        # Add group mapping for single-column group keys
+        elif self.group_cols:
+            # group_cols is a string or single-item list
+            unique_groups = [info["group_key"] for info in self.group_info.values()]
+            group_to_int = {group: idx for idx, group in enumerate(sorted(set(unique_groups)))}
+            reverse_mapping = {idx: group for group, idx in group_to_int.items()}
+            self.metadata["group_mapping"] = group_to_int
+            self.metadata["reverse_mapping"] = reverse_mapping
+            self.metadata["n_groups"] = len(group_to_int)
+
         # Add dataset structure information
         self.metadata["total_samples"] = self.dataset_length
         self.metadata["n_files"] = len(self.file_paths)
@@ -1093,15 +1103,13 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if self.time_col in group_data.columns:
             group_data = group_data.sort_values(by=self.time_col)
 
-        # Get group ID - for composite keys, use integer mapping if available
+        # Get group ID - always use integer encoding if mapping exists
         group_key = file_group_key[1]
-        if (
-            isinstance(self.group_cols, list)
-            and len(self.group_cols) > 1
-            and "group_mapping" in self.metadata
-        ):
-            # Use the integer mapping for efficiency
-            group_id = self.metadata["group_mapping"].get(group_key[0], group_key)
+        if "group_mapping" in self.metadata:
+            # For single-col groups, group_key is str, but mapping expects tuple
+            if not isinstance(group_key, tuple):
+                group_key = (group_key,)
+            group_id = self.metadata["group_mapping"].get(group_key, group_key)
         else:
             group_id = group_key
 

@@ -119,7 +119,13 @@ def test_temporal_features():
             print(f"\nSample keys: {list(sample.keys())}")
             print(f"Sample x shape: {sample['x'].shape}")
             print(f"Sample y shape: {sample['y'].shape}")
-
+            print(f"group_id (integer label): {sample['group_id']}")
+            if "group_mapping" in dataset.metadata:
+                print(f"group_mapping (int -> label): {dataset.metadata['group_mapping']}")
+            print(
+                "Note: group_id is the integer encoding; "
+                "use group_mapping to recover the original label."
+            )
             print(f"✅ {name} test passed!")
 
         return d1, d2, d3
