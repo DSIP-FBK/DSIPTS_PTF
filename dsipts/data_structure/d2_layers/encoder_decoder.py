@@ -11,14 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
 
 logger = logging.getLogger(__name__)
 
 
-class EncoderDecoderDataset:
+class EncoderDecoderDataset(Dataset):
     """Dataset class that handles windowing logic and encoder-decoder structure creation."""
 
     def __init__(
@@ -85,147 +85,146 @@ class EncoderDecoderDataset:
             clean batch structure with only necessary keys
         """
         window = self.valid_windows[idx]
-        past_indices = window["past_indices"]
-        future_indices = window["future_indices"]
+        group_idx = window["group_idx"]
+        start_idx = window["start_idx"]
 
-        # Get past and future data
-        past_samples = [self.d1_dataset[i] for i in past_indices]
-        future_samples = [self.d1_dataset[i] for i in future_indices]
+        # Get the full group data from D1 dataset
+        group_sample = self.d1_dataset[group_idx]
 
-        # Extract features and targets
-        past_features = torch.stack([sample["x"] for sample in past_samples])
-        future_targets = torch.stack([sample["y"] for sample in future_samples])
+        # Extract the window from the group's sequence
+        past_end = start_idx + self.past_len
+        future_end = past_end + self.future_len
+
+        # Extract past features and future targets from the group's tensors
+        # past_features = group_sample["x"][start_idx:past_end]  # [past_len, n_features] #noqa TODOremove this?
+        future_targets = group_sample["y"][past_end:future_end]  # [future_len, n_targets]
 
         # Build clean input dictionary - only include keys when data is present
         x = {}
 
-        # Core LinearTS model keys (always present)
-        x["x_num_past"] = past_features  # Past numerical features
-        x["y"] = future_targets  # Target values for training
-        x["idx_target"] = torch.tensor(list(range(len(self.target_cols))))  # Target indices
+        # Use D1 metadata as source of truth for indices
+        meta: Dict[str, Any] = getattr(self.d1_dataset, "metadata", {}) or {}
+        idx_categorical: List[int] = list(meta.get("idx_categorical", []))
+        idx_known_future: List[int] = list(meta.get("idx_known_future", []))
+        idx_unknown_future: List[int] = list(meta.get("idx_unknown_future", []))
+        idx_targets_full: List[int] = list(meta.get("idx_targets", []))
 
-        # Create index mappings for known/unknown numerical and categorical columns
-        # These help downstream models locate specific features within tensor inputs
+        # Determine numeric feature indices as complement of categorical
+        n_features = int(meta.get("n_features", group_sample["x"].shape[1]))
+        all_idx = list(range(n_features))
+        idx_num = [i for i in all_idx if i not in idx_categorical]
 
-        # Initialize index mappings
-        known_num_cols = getattr(self.d1_dataset, "known_cols", []) or []
-        unknown_num_cols = getattr(self.d1_dataset, "unknown_cols", []) or []
-        cat_cols = getattr(self.d1_dataset, "cat_cols", []) or []
-        num_cols = getattr(self.d1_dataset, "num_cols", []) or []
+        # Slice past/future from full X
+        X_full = group_sample["x"]
+        X_past = X_full[start_idx:past_end]
+        X_future = X_full[past_end:future_end]
 
-        # Filter to only include numerical columns
-        known_num_cols = [col for col in known_num_cols if col not in cat_cols]
-        unknown_num_cols = [col for col in unknown_num_cols if col not in cat_cols]
+        # Split numeric and categorical tensors with correct dtypes
+        x_num_past = (
+            X_past[:, idx_num].float()
+            if len(idx_num) > 0
+            else torch.zeros((self.past_len, 0), dtype=torch.float32)
+        )
+        x["x_num_past"] = x_num_past
 
-        # Create index mappings
-        idx_known_num = []
-        idx_unknown_num = []
-        idx_known_cat = []
-        idx_unknown_cat = []
+        if len(idx_categorical) > 0:
+            x_cat_past = X_past[:, idx_categorical].long()
+            x["x_cat_past"] = x_cat_past
 
-        # Map numerical columns to their indices
-        for i, col in enumerate(num_cols):
-            if col in known_num_cols:
-                idx_known_num.append(i)
-            elif col in unknown_num_cols:
-                idx_unknown_num.append(i)
+        # Known future features (split into num/cat)
+        if self.future_len > 0 and len(idx_known_future) > 0:
+            future_num_idx = [i for i in idx_known_future if i in idx_num]
+            future_cat_idx = [i for i in idx_known_future if i in idx_categorical]
 
-        # Map categorical columns to their indices
-        for i, col in enumerate(cat_cols):
-            if col in known_num_cols:
-                idx_known_cat.append(i)
-            elif col in unknown_num_cols:
-                idx_unknown_cat.append(i)
-            else:
-                # If not explicitly marked as known/unknown, treat as unknown
-                idx_unknown_cat.append(i)
+            if len(future_num_idx) > 0:
+                x["x_num_future"] = X_future[:, future_num_idx].float()
+            if len(future_cat_idx) > 0:
+                x["x_cat_future"] = X_future[:, future_cat_idx].long()
 
-        # Add index mappings to output
+        # Targets for decoder (future target values)
+        x["y"] = future_targets.float()
+
+        # Map idx_targets (relative to full X) into positions within x_num_past
+        num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
+        mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
+        if len(mapped_targets) == 0 and len(idx_targets_full) > 0:
+            logger.warning("All targets mapped to non-numeric features; idx_target will be empty")
+        x["idx_target"] = torch.tensor(mapped_targets, dtype=torch.long)
+
+        # Optional: provide index mappings for known/unknown relative to past feature splits
+        # Numeric index mappings (relative to x_num_past)
         x["idx_known_num"] = (
-            torch.tensor(idx_known_num, dtype=torch.long)
-            if idx_known_num
+            torch.tensor(
+                [num_pos_map[i] for i in idx_known_future if i in num_pos_map], dtype=torch.long
+            )
+            if len(idx_known_future) > 0
             else torch.zeros(0, dtype=torch.long)
-        )  # noqa
+        )
         x["idx_unknown_num"] = (
-            torch.tensor(idx_unknown_num, dtype=torch.long)
-            if idx_unknown_num
+            torch.tensor(
+                [num_pos_map[i] for i in idx_unknown_future if i in num_pos_map], dtype=torch.long
+            )
+            if len(idx_unknown_future) > 0
             else torch.zeros(0, dtype=torch.long)
-        )  # noqa
-        x["idx_known_cat"] = (
-            torch.tensor(idx_known_cat, dtype=torch.long)
-            if idx_known_cat
-            else torch.zeros(0, dtype=torch.long)
-        )  # noqa
-        x["idx_unknown_cat"] = (
-            torch.tensor(idx_unknown_cat, dtype=torch.long)
-            if idx_unknown_cat
-            else torch.zeros(0, dtype=torch.long)
-        )  # noqa
+        )
 
-        # Get categorical cardinality list (ordered to match categorical past features)
-        categorical_cardinality_past = []
-        if hasattr(self.d1_dataset, "label_encoders") and self.cat_feature_cols:
-            for col in self.cat_feature_cols:
-                if col in self.d1_dataset.label_encoders:
-                    # Get number of categories from the encoder
-                    cardinality = len(self.d1_dataset.label_encoders[col].categories_[0])
-                    categorical_cardinality_past.append(cardinality)
-                else:
-                    # Default cardinality if encoder not available
-                    categorical_cardinality_past.append(1)
+        # Categorical index mappings (relative to x_cat_past)
+        if len(idx_categorical) > 0:
+            cat_pos_map = {orig: pos for pos, orig in enumerate(idx_categorical)}
+            x["idx_known_cat"] = (
+                torch.tensor(
+                    [cat_pos_map[i] for i in idx_known_future if i in cat_pos_map], dtype=torch.long
+                )
+                if len(idx_known_future) > 0
+                else torch.zeros(0, dtype=torch.long)
+            )
+            x["idx_unknown_cat"] = (
+                torch.tensor(
+                    [cat_pos_map[i] for i in idx_unknown_future if i in cat_pos_map],
+                    dtype=torch.long,
+                )
+                if len(idx_unknown_future) > 0
+                else torch.zeros(0, dtype=torch.long)
+            )
 
-        # Add categorical cardinality to metadata
-        x["categorical_cardinality_past"] = categorical_cardinality_past
-
-        # Add categorical features only if present
-        if len(self.cat_feature_cols) > 0:
-            # Extract categorical features from past samples
-            cat_features = torch.zeros(self.past_len, len(self.cat_feature_cols), dtype=torch.long)
-            for i, sample in enumerate(past_samples):
-                if "categorical" in sample and sample["categorical"] is not None:
-                    # Extract categorical features for this time step
-                    cat_data = sample["categorical"]
-                    if isinstance(cat_data, np.ndarray):
-                        cat_features[i] = torch.from_numpy(cat_data.astype(np.int64))
-                    else:
-                        cat_features[i] = torch.tensor(cat_data, dtype=torch.long)
-            x["x_cat_past"] = cat_features
-
-        # Add future numerical features only if present (known future features)
-        if len(self.cont_feature_cols) > 0 and hasattr(self, "_has_future_features"):
-            future_cont = torch.zeros(self.future_len, len(self.cont_feature_cols))
-            x["x_num_future"] = future_cont
+        # Categorical cardinality ordered to match x_cat_past columns
+        categorical_cardinality_past: List[int] = []
+        cat_mappings = meta.get("categorical_mappings", {}) or {}
+        feature_cols_meta: List[str] = list(meta.get("feature_cols", []))
+        # Build feature_index -> cardinality map from metadata
+        featidx_to_card: Dict[int, int] = {}
+        for _col, mapping in cat_mappings.items():
+            try:
+                fi = int(mapping.get("feature_index", -1))
+                card = int(mapping.get("cardinality", 1))
+                if fi >= 0:
+                    featidx_to_card[fi] = card
+            except Exception:
+                continue
+        # Fallback: use D1 label_encoders if metadata lacks cardinality
+        label_encoders = getattr(self.d1_dataset, "label_encoders", None)
+        if len(idx_categorical) > 0:
+            for fi in idx_categorical:
+                card = featidx_to_card.get(fi)
+                if card is None and label_encoders is not None and feature_cols_meta:
+                    try:
+                        col_name = feature_cols_meta[fi]
+                        if col_name in label_encoders:
+                            enc = label_encoders[col_name]
+                            # LabelEncoder exposes classes_
+                            card = len(getattr(enc, "classes_", [])) or None
+                    except Exception:
+                        card = None
+                categorical_cardinality_past.append(int(card) if card is not None else 1)
+            x["categorical_cardinality_past"] = categorical_cardinality_past
 
         # Include target in decoder part if requested (for select models)
         if self.include_target_in_decoder and self.future_len > 0:
-            # Add target to decoder numerical features
-            x["decoder_target"] = future_targets
-
-        # Add future categorical features only if present
-        if len(self.cat_feature_cols) > 0:
-            # Always provide future categorical features if we have categorical features
-            # This ensures the LinearTS complex case gets the expected input dimensions
-            future_cat = torch.zeros(self.future_len, len(self.cat_feature_cols), dtype=torch.long)
-            x["x_cat_future"] = future_cat
-
-        # Add categorical features only if they exist
-        if self.cat_feature_cols and len(self.cat_feature_cols) > 0:
-            # Only include categorical keys if categorical columns exist
-            static_cat = torch.zeros(len(self.cat_feature_cols))
-            x["static_categorical_features"] = static_cat
-
-            # Add encoder_cat only if categorical features exist
-            x["encoder_cat"] = torch.zeros((self.past_len, len(self.cat_feature_cols)))
-            x["x_cat_past"] = x["encoder_cat"]
-
-            # Add decoder_cat only if categorical features exist
-            if self.future_len > 0:
-                x["decoder_cat"] = torch.zeros((self.future_len, len(self.cat_feature_cols)))
-                x["x_cat_future"] = x["decoder_cat"]
+            x["decoder_target"] = future_targets.float()
 
         # Backward compatibility keys (kept for existing code)
-        x["past_features"] = past_features
-        x["future_targets"] = future_targets
+        x["past_features"] = X_past
+        x["future_targets"] = future_targets.float()
 
         # Essential metadata
         x["group_id"] = window.get("group_id", 0)
@@ -398,54 +397,39 @@ class EncoderDecoder(pl.LightningDataModule):
         """
         Build valid sliding windows from the D1 dataset.
 
-        This method scans through all data in the D1 dataset and identifies
-        valid windows that have sufficient past and future data.
+        The D1 dataset returns all data for a group as a single sample.
+        We need to extract individual timesteps from each group to create windows.
         """
         self.valid_windows = []
 
-        # Group data by group columns
-        # Since D1 dataset handles grouping internally, we need to extract group information
-        group_data = {}
+        # Process each group in the D1 dataset
+        for group_idx in range(len(self.d1_dataset)):
+            group_sample = self.d1_dataset[group_idx]
+            group_id = group_sample.get("group_id", group_idx)
+            seq_len = group_sample.get("seq_len", 0)
 
-        # Collect all samples and group them
-        for idx in range(len(self.d1_dataset)):
-            sample = self.d1_dataset[idx]
-            group_id = sample["group_id"]
+            logger.debug(f"Processing group {group_id} with sequence length {seq_len}")
 
-            if group_id not in group_data:
-                group_data[group_id] = []
+            # Create sliding windows within this group's sequence
+            max_windows = seq_len - self.past_len - self.future_len + 1
+            logger.debug(
+                f"Group {group_id}: seq_len={seq_len}, past_len={self.past_len}, future_len={self.future_len}, max_windows={max_windows}"  # noqa
+            )
 
-            group_data[group_id].append((idx, sample))
+            if max_windows > 0:
+                for i in range(0, max_windows, self.step_size):
+                    # Create window metadata
+                    window = {
+                        "group_idx": group_idx,  # Index in D1 dataset
+                        "group_id": group_id,  # Group identifier
+                        "start_idx": i,  # Start position within group sequence
+                        "past_len": self.past_len,
+                        "future_len": self.future_len,
+                    }
 
-        # Process each group to find valid windows
-        for group_id, group_samples in group_data.items():
-            # Sort by time if available
-            if "past_time" in group_samples[0][1]:
-                group_samples.sort(
-                    key=lambda x: x[1]["past_time"] if x[1]["past_time"] is not None else 0
-                )
-
-            # Find valid windows in this group
-            group_indices = [idx for idx, _ in group_samples]
-
-            # Create sliding windows
-            for i in range(
-                0, len(group_indices) - self.past_len - self.future_len + 1, self.step_size
-            ):
-                past_indices = group_indices[i : i + self.past_len]
-                future_indices = group_indices[
-                    i + self.past_len : i + self.past_len + self.future_len
-                ]
-
-                # Validate window (check for sufficient non-NaN values)
-                if self._is_valid_window(past_indices, future_indices):
-                    self.valid_windows.append(
-                        {
-                            "group_id": group_id,
-                            "past_indices": past_indices,
-                            "future_indices": future_indices,
-                            "start_idx": i,
-                        }
+                    self.valid_windows.append(window)
+                    logger.debug(
+                        f"Added valid window {len(self.valid_windows)} for group {group_id} at position {i}"  # noqa
                     )
 
                     # Limit samples per group if specified
@@ -455,6 +439,10 @@ class EncoderDecoder(pl.LightningDataModule):
                         >= self.max_samples_per_group
                     ):
                         break
+            else:
+                logger.warning(
+                    f"Group {group_id} has insufficient data for windows (seq_len={seq_len}, required={self.past_len + self.future_len})"  # noqa
+                )
 
     def _is_valid_window(self, past_indices: List[int], future_indices: List[int]) -> bool:
         """
