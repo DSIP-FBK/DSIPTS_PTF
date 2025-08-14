@@ -51,6 +51,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         known_cols: Optional[List[str]] = None,
         unknown_cols: Optional[List[str]] = None,
         enrich_cat: Optional[List[str]] = None,
+        global_forecasting: bool = False,
         weights: Optional[str] = None,
         memory_efficient: bool = False,
         chunk_size: int = 10000,
@@ -74,6 +75,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 all target_cols are considered unknown)
             enrich_cat: List of temporal categorical variables to create from time column.
                 Supported values: ['hour', 'dow', 'month', 'minute']
+            global_forecasting: If True, use global forecasting. If False (default)
+                and multiple groups exist, add group as categorical known variable.
             weights: Name of weights column
             memory_efficient: Whether to use memory-efficient mode
             chunk_size: Chunk size for processing data (used in memory-efficient
@@ -118,12 +121,17 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._num_cols = num_cols or []
         self._enrich_cat = enrich_cat
         self.enrich_cat = enrich_cat or []
+        self.global_forecasting = global_forecasting
 
         # Handle group columns properly (already set self._group_cols above)
 
         # Set known and unknown columns with proper handling for None values
         self._known_cols = known_cols or []
         self._unknown_cols = unknown_cols or list(self._target_cols) if self._target_cols else []
+
+        # Handle global forecasting logic: if global_forecasting=False and multiple groups exist,
+        # add group columns to categorical and known variables
+        self._apply_global_forecasting_logic()
 
         # Infer feature_cols automatically from headers and other specifications
         self._feature_cols = self._infer_feature_columns()
@@ -223,6 +231,30 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info(f"Excluded special columns: {list(special_columns)}")
 
         return feature_cols
+
+    def _apply_global_forecasting_logic(self):
+        """Apply global forecasting logic: if global_forecasting=False and multiple groups exist,
+        add group columns to categorical and known variables."""
+        logger = logging.getLogger(__name__)
+
+        # Only apply logic if global_forecasting is False and we have group columns
+        if self.global_forecasting or not self._group_cols:
+            return
+
+        logger.info(f"Global forecasting disabled with group columns {self._group_cols}")
+        logger.info("Adding group columns to categorical and known variables for local forecasting")
+
+        # Add group columns to categorical columns (groups need encoding)
+        for group_col in self._group_cols:
+            if group_col not in self._cat_cols:
+                self._cat_cols.append(group_col)
+                logger.info(f"Added group column '{group_col}' to categorical columns")
+
+        # Add group columns to known columns (group identity is known at prediction time)
+        for group_col in self._group_cols:
+            if group_col not in self._known_cols:
+                self._known_cols.append(group_col)
+                logger.info(f"Added group column '{group_col}' to known columns")
 
     def _validate_enrich_cat(self):
         """Validate the enrich_cat parameter."""
@@ -975,17 +1007,27 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if not self.group_cols:
             return df
 
+        # Normalize group_key: unwrap nested tuple like ((a, b),) -> (a, b)
+        if isinstance(group_key, tuple) and len(group_key) == 1 and isinstance(group_key[0], tuple):
+            group_key = group_key[0]
+
         # Create a mask for the group
         if isinstance(self.group_cols, list):
             if len(self.group_cols) > 1:
-                # Multiple group columns
-                mask = pd.Series(True, index=df.index)
-                for i, col in enumerate(self.group_cols):
-                    mask &= df[col] == group_key[i]
+                # Ensure group_key is a tuple of the same length as group_cols
+                if not isinstance(group_key, tuple):
+                    group_key = (group_key,)
+                if len(group_key) != len(self.group_cols):
+                    logger.debug(
+                        f"Group key length mismatch: expected {len(self.group_cols)},"
+                        f" got {len(group_key)}; using tuple equality filter"
+                    )
+                mask = df[self.group_cols].apply(lambda x: tuple(x), axis=1) == tuple(group_key)
             elif len(self.group_cols) == 1:
                 # Single group column in a list
                 col = self.group_cols[0]
-                mask = df[col] == group_key[0]
+                key_val = group_key[0] if isinstance(group_key, tuple) else group_key
+                mask = df[col] == key_val
                 logger.debug(f"Filtering on single group column in list: {col}")
             else:
                 # Empty list case
@@ -993,7 +1035,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 return df
         else:
             # Single group column as string
-            mask = df[self.group_cols] == group_key[0]
+            key_val = group_key[0] if isinstance(group_key, tuple) else group_key
+            mask = df[self.group_cols] == key_val
 
         # Return the filtered data without copying
         return df[mask]
