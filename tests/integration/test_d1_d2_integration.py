@@ -5,6 +5,7 @@ layers without involving models. It verifies that the data pipeline works correc
 with various configurations and edge cases.
 """
 
+import logging
 import os
 import shutil
 import tempfile
@@ -160,24 +161,56 @@ def create_sample_data(
 class TestD1D2Integration:
     """Integration tests for D1 and D2 layers."""
 
+    def _log_test_start(self, test_name):
+        """Helper method to log test start with visual separation."""
+        logger = logging.getLogger(__name__)
+        logger.info("\n" + "=" * 80)
+        logger.info(f"STARTING TEST: {test_name}")
+        logger.info("=" * 80)
+        return logger
+
+    def _log_test_end(self, logger, test_name):
+        """Helper method to log test completion."""
+        logger.info("-" * 80)
+        logger.info(f"COMPLETED TEST: {test_name}")
+        logger.info("=" * 80 + "\n")
+
     def test_basic_integration(self, temp_data_dir):
         """Test basic integration between D1 and D2 layers."""
+        logger = self._log_test_start("test_basic_integration")
+
         # Create sample data with debugging enabled
+        logger.info("\n[1/5] CREATING SAMPLE DATA")
+        logger.info("-" * 40)
         data_path, metadata = create_sample_data(temp_data_dir, debug=True)
+        logger.info(f"✓ Sample data created at: {data_path}")
+        logger.info(f"✓ Metadata keys: {list(metadata.keys())}")
+
+        # Log important metadata in a more readable format
+        logger.info("\n[2/5] DATASET METADATA")
+        logger.info("-" * 40)
+        logger.info(f"Time Column: {metadata['time_col']}")
+        logger.info(f"Target Columns: {metadata['target_cols']}")
+        logger.info(f"Feature Columns: {metadata.get('num_cols', [])}")
+        logger.info(f"Categorical Columns: {metadata.get('cat_cols', [])}")
+        logger.info(f"Group Columns: {metadata.get('group_cols', [])}")
+        logger.info(f"Number of Groups: {len(metadata.get('groups', []))}")
+        logger.info(f"Number of Timesteps: {metadata.get('n_timesteps', 'N/A')}")
 
         # Print column names for debugging
-        print("DEBUG: Checking CSV file structure")
+        logger.info("Checking CSV file structure")
         df = pd.read_csv(data_path)
-        print(f"DEBUG: CSV columns: {df.columns.tolist()}")
-        print(f"DEBUG: Group values: {df['group_id'].unique().tolist()}")
-        print(f"DEBUG: First few rows:\n{df.head()}")
+        logger.info(f"CSV columns: {df.columns.tolist()}")
+        logger.info(f"Group values: {df['group_id'].unique().tolist()}")
+        logger.debug(f"First few rows:\n{df.head()}")
 
         # Save the CSV file for inspection
         debug_csv_path = os.path.join(temp_data_dir, "debug_data.csv")
         df.to_csv(debug_csv_path, index=False)
-        print(f"DEBUG: Saved debug CSV to {debug_csv_path}")
+        logger.info(f"Saved debug CSV to {debug_csv_path}")
 
         # Initialize D1 layer with group_cols as a list
+        logger.info("Initializing D1 layer")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -186,12 +219,12 @@ class TestD1D2Integration:
             num_cols=metadata["num_cols"],
             cat_cols=metadata["cat_cols"],
         )
-
-        print(f"DEBUG: D1 initialized with group_cols={d1.group_cols}")
-        print(f"DEBUG: D1 has {len(d1)} groups")
-        print(f"DEBUG: D1 group info: {list(d1.group_info.keys())[:3]}...")
+        logger.info(f"D1 initialized with group_cols={d1.group_cols}")
+        logger.info(f"D1 has {len(d1)} groups")
+        logger.debug(f"D1 group info: {list(d1.group_info.keys())[:3]}...")
 
         # Initialize D2 layer
+        logger.info("Initializing D2 layer")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -200,6 +233,7 @@ class TestD1D2Integration:
             split_config=(0.7, 0.15, 0.15),
             precompute=True,
         )
+        logger.info("D2 layer initialized successfully")
 
         # Test basic properties
         assert len(d2.train_dataset) > 0, "D2 train dataset should have samples"
@@ -253,15 +287,20 @@ class TestD1D2Integration:
 
     def test_empty_group_cols(self, temp_data_dir):
         """Test integration with empty group_cols."""
+        logger = self._log_test_start("test_empty_group_cols")
+
         # Create sample data with debugging
+        logger.info("Creating sample data with debugging enabled")
         data_path, metadata = create_sample_data(temp_data_dir, debug=True)
+        logger.info(f"Sample data created at {data_path}")
 
         # Print column names for debugging
-        print("DEBUG: Checking CSV file structure for empty group test")
+        logger.info("Checking CSV file structure for empty group test")
         df = pd.read_csv(data_path)
-        print(f"DEBUG: CSV columns: {df.columns.tolist()}")
+        logger.info(f"CSV columns: {df.columns.tolist()}")
 
         # Initialize D1 layer with empty group_cols
+        logger.info("Initializing D1 layer with empty group_cols")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -270,8 +309,10 @@ class TestD1D2Integration:
             num_cols=metadata["num_cols"],
             cat_cols=metadata["cat_cols"],
         )
+        logger.info("D1 layer initialized with empty group_cols")
 
         # Initialize D2 layer
+        logger.info("Initializing D2 layer")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -280,28 +321,44 @@ class TestD1D2Integration:
             split_config=(0.7, 0.15, 0.15),
             precompute=True,
         )
+        logger.info("D2 layer initialized successfully")
 
         # Test basic properties
+        logger.info("Testing basic properties")
         assert len(d2.dataset) > 0, "D2 dataset should have samples"
+        logger.info("Basic properties test passed")
 
         # Test data access
+        logger.info("Testing data access")
         sample = d2.dataset[0]
         x, y = sample
+        logger.info("Data access successful")
 
         # Check that everything works with empty group_cols
+        logger.info("Checking group_id presence")
         assert "group_id" in x, "group_id should be present even with empty group_cols"
+        logger.info("group_id check passed")
 
         # Test dataloader
+        logger.info("Testing dataloader")
         train_loader = d2.train_dataloader()
         batch = next(iter(train_loader))
+        logger.info("Dataloader test successful")
 
         # Check batch dimensions
+        logger.info("Checking batch dimensions")
         assert batch["x_num_past"].shape[0] > 0, "Batch should have samples"
+        logger.info("Batch dimensions check passed")
+        logger.info("All assertions passed for empty group_cols test")
 
     def test_known_unknown_features(self, temp_data_dir):
         """Test integration with known/unknown feature specification."""
+        logger = self._log_test_start("test_known_unknown_features")
+
         # Create sample data with explicit known/unknown numerical columns
+        logger.info("Creating sample data with explicit known/unknown columns")
         data_path, metadata = create_sample_data(temp_data_dir, include_unknown=True)
+        logger.info(f"Sample data created at {data_path}")
 
         # Extract known/unknown numerical and categorical columns for clarity
         num_cols = metadata["num_cols"]
@@ -315,13 +372,14 @@ class TestD1D2Integration:
         unknown_cat_cols = [col for col in metadata["unknown_cols"] if col in cat_cols]
 
         # DEBUG: Print metadata to verify known/unknown splits
-        print(f"DEBUG: METADATA: {metadata}")
-        print(f"DEBUG: Known numerical columns: {known_num_cols}")
-        print(f"DEBUG: Unknown numerical columns: {unknown_num_cols}")
-        print(f"DEBUG: Known categorical columns: {known_cat_cols}")
-        print(f"DEBUG: Unknown categorical columns: {unknown_cat_cols}")
+        logger.debug(f"METADATA: {metadata}")
+        logger.debug(f"Known numerical columns: {known_num_cols}")
+        logger.debug(f"Unknown numerical columns: {unknown_num_cols}")
+        logger.debug(f"Known categorical columns: {known_cat_cols}")
+        logger.debug(f"Unknown categorical columns: {unknown_cat_cols}")
 
         # Initialize D1 layer with known/unknown columns
+        logger.info("Initializing D1 layer with known/unknown columns")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -332,8 +390,10 @@ class TestD1D2Integration:
             known_cols=metadata["known_cols"],
             unknown_cols=metadata["unknown_cols"],
         )
+        logger.info("D1 layer initialized with known/unknown columns")
 
         # Initialize D2 layer
+        logger.info("Initializing D2 layer")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -342,35 +402,50 @@ class TestD1D2Integration:
             split_config=(0.7, 0.15, 0.15),
             precompute=True,
         )
+        logger.info("D2 layer initialized successfully")
 
         # Test data access
+        logger.info("Testing data access")
         sample = d2.dataset[0]
         x, y = sample
-        print("Sample for testing known and unkown features: ", type(sample), end="\n")
-        print("Input (x) keys:")
+        logger.info("Data access successful")
+        logger.debug("Sample for testing known and unknown features: %s", type(sample))
+        logger.debug("Input (x) keys:")
         for key in x:
-            print(key, "\n", x[key])
-        print("Target (y) shape:", y.shape)
+            logger.debug("%s: %s", key, x[key])
+        logger.debug("Target (y) shape: %s", y.shape)
 
         # Check index mappings
+        logger.info("Checking index mappings")
         assert len(x["idx_known_num"]) > 0, "idx_known_num should not be empty"
         assert len(x["idx_unknown_num"]) > 0, "idx_unknown_num should not be empty"
+        logger.info("Index mappings check passed")
 
         # Test dataloader
+        logger.info("Testing dataloader")
         train_loader = d2.train_dataloader()
         batch = next(iter(train_loader))
+        logger.info("Dataloader test successful")
 
         # Check that index mappings are preserved in batch
+        logger.info("Checking index mappings in batch")
         assert "idx_known_num" in batch, "idx_known_num should be in batch"
         assert "idx_unknown_num" in batch, "idx_unknown_num should be in batch"
         assert len(batch["idx_known_num"]) > 0, "idx_known_num should not be empty in batch"
+        logger.info("Index mappings in batch check passed")
+        logger.info("All assertions passed for known/unknown features test")
 
     def test_target_in_decoder(self, temp_data_dir):
         """Test integration with target in decoder option."""
+        logger = self._log_test_start("test_target_in_decoder")
+
         # Create sample data
+        logger.info("Creating sample data")
         data_path, metadata = create_sample_data(temp_data_dir)
+        logger.info(f"Sample data created at {data_path}")
 
         # Initialize D1 layer
+        logger.info("Initializing D1 layer")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -379,8 +454,10 @@ class TestD1D2Integration:
             num_cols=metadata["num_cols"],
             cat_cols=metadata["cat_cols"],
         )
+        logger.info("D1 layer initialized successfully")
 
         # Initialize D2 layer with include_target_in_decoder=True
+        logger.info("Initializing D2 layer with include_target_in_decoder=True")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -390,32 +467,47 @@ class TestD1D2Integration:
             precompute=True,
             include_target_in_decoder=True,
         )
+        logger.info("D2 layer initialized with include_target_in_decoder=True")
 
         # Test data access
+        logger.info("Testing data access")
         sample = d2.dataset[0]
         x, y = sample
+        logger.info("Data access successful")
 
         # Check that decoder_target is present
+        logger.info("Checking decoder_target presence")
         assert (
             "decoder_target" in x
         ), "decoder_target should be present when include_target_in_decoder=True"
+        logger.info("decoder_target presence check passed")
 
         # Test dataloader
+        logger.info("Testing dataloader")
         train_loader = d2.train_dataloader()
         batch = next(iter(train_loader))
+        logger.info("Dataloader test successful")
 
         # Check that decoder_target is preserved in batch
+        logger.info("Checking decoder_target in batch")
         assert "decoder_target" in batch, "decoder_target should be in batch"
         assert (
             batch["decoder_target"].shape == batch["y"].shape
         ), "decoder_target should have same shape as y"
+        logger.info("decoder_target in batch check passed")
+        logger.info("All assertions passed for target in decoder test")
 
     def test_categorical_features(self, temp_data_dir):
         """Test integration with categorical features."""
+        logger = self._log_test_start("test_categorical_features")
+
         # Create sample data with more categorical features
+        logger.info("Creating sample data with more categorical features")
         data_path, metadata = create_sample_data(temp_data_dir, n_cat_features=5)
+        logger.info(f"Sample data created at {data_path}")
 
         # Initialize D1 layer
+        logger.info("Initializing D1 layer")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -424,8 +516,10 @@ class TestD1D2Integration:
             num_cols=metadata["num_cols"],
             cat_cols=metadata["cat_cols"],
         )
+        logger.info("D1 layer initialized successfully")
 
         # Initialize D2 layer
+        logger.info("Initializing D2 layer")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -434,40 +528,57 @@ class TestD1D2Integration:
             split_config=(0.7, 0.15, 0.15),
             precompute=True,
         )
+        logger.info("D2 layer initialized successfully")
 
         # Test data access
+        logger.info("Testing data access")
         sample = d2.dataset[0]
         x, y = sample
+        logger.info("Data access successful")
 
         # Check categorical features
+        logger.info("Checking categorical features")
         assert "x_cat_past" in x, "x_cat_past should be present"
         assert x["x_cat_past"].shape[0] == 10, "x_cat_past should have past_len rows"
         assert x["x_cat_past"].shape[1] == len(
             metadata["cat_cols"]
         ), "x_cat_past should have correct number of columns"
+        logger.info("Categorical features check passed")
 
         # Check categorical cardinality
+        logger.info("Checking categorical cardinality")
         assert "categorical_cardinality_past" in x, "categorical_cardinality_past should be present"
         assert len(x["categorical_cardinality_past"]) == len(
             metadata["cat_cols"]
         ), "categorical_cardinality_past should match number of categorical columns"
+        logger.info("Categorical cardinality check passed")
 
         # Test dataloader
+        logger.info("Testing dataloader")
         train_loader = d2.train_dataloader()
         batch = next(iter(train_loader))
+        logger.info("Dataloader test successful")
 
         # Check that categorical features are preserved in batch
+        logger.info("Checking categorical features in batch")
         assert "x_cat_past" in batch, "x_cat_past should be in batch"
         assert (
             "categorical_cardinality_past" in batch
         ), "categorical_cardinality_past should be in batch"
+        logger.info("Categorical features in batch check passed")
+        logger.info("All assertions passed for categorical features test")
 
     def test_multiple_targets(self, temp_data_dir):
         """Test integration with multiple targets."""
+        logger = self._log_test_start("test_multiple_targets")
+
         # Create sample data with multiple targets
+        logger.info("Creating sample data with multiple targets")
         data_path, metadata = create_sample_data(temp_data_dir, n_targets=3)
+        logger.info(f"Sample data created at {data_path}")
 
         # Initialize D1 layer
+        logger.info("Initializing D1 layer with multiple targets")
         d1 = MultiSourceTSDataSet(
             file_paths=[data_path],
             time_col=metadata["time_col"],
@@ -476,8 +587,10 @@ class TestD1D2Integration:
             num_cols=metadata["num_cols"],
             cat_cols=metadata["cat_cols"],
         )
+        logger.info("D1 layer initialized successfully")
 
         # Initialize D2 layer
+        logger.info("Initializing D2 layer")
         d2 = EncoderDecoder(
             d1_dataset=d1,
             past_len=10,
@@ -486,30 +599,78 @@ class TestD1D2Integration:
             split_config=(0.7, 0.15, 0.15),
             precompute=True,
         )
+        logger.info("D2 layer initialized successfully")
 
         # Test data access
+        logger.info("Testing data access")
         sample = d2.dataset[0]
         x, y = sample
+        logger.info("Data access successful")
 
         # Check target dimensions
+        logger.info("Checking target dimensions")
         assert y.shape[-1] == len(
             metadata["target_cols"]
         ), "Target tensor should have correct number of columns"
+        logger.info("Target dimensions check passed")
 
         # Test dataloader
+        logger.info("Testing dataloader")
         train_loader = d2.train_dataloader()
         batch = next(iter(train_loader))
+        logger.info("Dataloader test successful")
 
         # Check that target dimensions are preserved in batch
+        logger.info("Checking target dimensions in batch")
         assert batch["y"].shape[-1] == len(
             metadata["target_cols"]
         ), "Target tensor should have correct number of columns in batch"
+        logger.info("All assertions passed for multiple targets test")
 
 
 if __name__ == "__main__":
     # For manual testing
+    import os
     import sys
 
     import pytest
 
-    sys.exit(pytest.main(["-v", __file__]))
+    # Get the absolute path for the log file
+    log_dir = os.path.dirname(os.path.abspath(__file__))
+    log_file = os.path.join(log_dir, "test_d1_d2_integration.log")
+
+    # Ensure the directory exists
+    os.makedirs(log_dir, exist_ok=True)
+
+    print(f"SAVING THE LOGS TO: {log_file}")
+
+    # Clear any existing log handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Configure logging with both file and console handlers
+    file_handler = logging.FileHandler(log_file, mode="w")  # 'w' to overwrite existing file
+    file_handler.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+
+    # Create formatter and add it to the handlers
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add handlers to the root logger
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting integration tests with verbose logging")
+
+    # Run the tests
+    exit_code = pytest.main(["-v", "--tb=short", __file__])
+
+    logger.info(f"Integration tests completed with exit code: {exit_code}")
+    sys.exit(exit_code)
