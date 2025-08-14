@@ -3,6 +3,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,121 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 # Import from new structure only
 from dsipts.data_structure.d1_layers import MultiSourceTSDataSet
+from dsipts.data_structure.d1_layers.base_d1 import BaseD1Layer
 from dsipts.data_structure.d2_layers import EncoderDecoder, custom_collate_fn
+
+
+class CustomD1TestLayer(BaseD1Layer):
+    """Custom D1 layer for testing D2 layer functionality."""
+
+    def __init__(self, global_forecasting=True):
+        """Initialize the custom D1 layer with synthetic data."""
+        self.global_forecasting = global_forecasting
+
+        # Set up required attributes for BaseD1Layer interface
+        self._group_cols = [] if global_forecasting else ["group"]
+        self._time_col = "time"
+        self._num_cols = ["feature_0", "feature_1"]
+        self._cat_cols = ["cat_feature"]
+        self._target_cols = ["target_0"]
+        self._known_cols = ["feature_0"]
+        self._unknown_cols = ["feature_1"]
+
+        # Set up metadata with all required fields
+        self.metadata = {
+            "group_cols": self._group_cols,
+            "time_col": self._time_col,
+            "num_cols": self._num_cols,
+            "cat_cols": self._cat_cols,
+            "target_cols": self._target_cols,
+            "known_cols": self._known_cols,
+            "unknown_cols": self._unknown_cols,
+            "global_forecasting": global_forecasting,
+        }
+
+    def __len__(self) -> int:
+        """Return the number of groups."""
+        return 2  # Always return 2 groups for testing
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Get data for a specific group with proper sequence data."""
+        if not isinstance(idx, int) or idx >= 2:
+            raise IndexError(f"Group index {idx} out of range")
+
+        # Create synthetic data with sufficient sequence length for windows
+        seq_len = 15  # Long enough for windows with past_len=3, future_len=2
+
+        # Create numerical features tensor [seq_len, num_features]
+        x_num = torch.randn(seq_len, len(self.metadata["num_cols"]))
+
+        # Create categorical features tensor [seq_len, cat_features]
+        x_cat = torch.zeros(seq_len, len(self.metadata["cat_cols"]), dtype=torch.long)
+        for i in range(seq_len):
+            x_cat[i, 0] = i % 3  # 3 different categorical values
+
+        # Create target tensor [seq_len, num_targets]
+        y = torch.randn(seq_len, len(self.metadata["target_cols"]))
+
+        # Create time indices
+        time_idx = torch.arange(seq_len, dtype=torch.long)
+
+        # Build the complete return dictionary with all required fields
+        result = {
+            "group_id": idx,  # Integer group ID
+            "seq_len": seq_len,  # Sequence length
+            "time_idx": time_idx,  # Time indices
+        }
+
+        # Include numerical features
+        if len(self._num_cols) > 0:
+            result["x"] = x_num
+
+        # Include categorical features - valid check if categorical features exists
+        # EncoderDecoder checks for idx_categorical in metadata to determine if categori
+        if len(self._cat_cols) > 0:
+            result["x_cat"] = x_cat
+            # Add categorical indices to metadata
+            if "idx_categorical" not in self.metadata:
+                self.metadata["idx_categorical"] = [0]  # Index position of categorical feature
+
+        # Include targets
+        if len(self._target_cols) > 0:
+            result["y"] = y
+            # Add target indices to metadata
+            if "idx_targets" not in self.metadata:
+                self.metadata["idx_targets"] = [0]  # Index position of target
+
+        return result
+
+    @property
+    def num_cols(self) -> List[str]:
+        """Return numerical columns."""
+        return self.metadata["num_cols"]
+
+    @property
+    def cat_cols(self) -> List[str]:
+        """Return categorical columns."""
+        return self.metadata["cat_cols"]
+
+    @property
+    def target_cols(self) -> List[str]:
+        """Return target columns."""
+        return self.metadata["target_cols"]
+
+    @property
+    def known_cols(self) -> List[str]:
+        """Return known columns."""
+        return self.metadata["known_cols"]
+
+    @property
+    def unknown_cols(self) -> List[str]:
+        """Return unknown columns."""
+        return self.metadata["unknown_cols"]
+
+    @property
+    def feature_cols(self) -> List[str]:
+        """Return feature columns (combination of num_cols and cat_cols)."""
+        return self.metadata["num_cols"] + self.metadata["cat_cols"]
 
 
 class TestEncoderDecoder(unittest.TestCase):
@@ -455,30 +570,88 @@ class TestEncoderDecoder(unittest.TestCase):
 
             # Model-compatible target dimensions were already checked above
 
-    def test_backward_compatibility_imports(self):
-        """Test that legacy D2 imports still work."""
-        # Test legacy imports from main module
-        from dsipts.data_structure import EncoderDecoder, TSDataModule
+    def test_batch_output_structure(self):
+        """Test the batch output structure, group_id type, and global forecasting functionality."""
+        # Test with global_forecasting=True (default)
+        d1_global = CustomD1TestLayer(global_forecasting=True)
 
-        # These should be importable without errors and should be the same class
-        assert TSDataModule is not None
-        assert TSDataModule is EncoderDecoder  # Should be an alias
-
-        # Test that we can create instances using the legacy name
-        d2_legacy = TSDataModule(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
+        # Use smaller window sizes to ensure valid windows
+        d2_global = EncoderDecoder(
+            d1_dataset=d1_global,
+            past_len=3,  # Smaller past window
+            future_len=2,  # Smaller future window
             batch_size=32,
             precompute=True,
         )
 
-        # Should have the same interface as EncoderDecoder
-        self.assertEqual(d2_legacy.past_len, 5)
-        self.assertEqual(d2_legacy.future_len, 2)
-        self.assertTrue(hasattr(d2_legacy, "train_dataloader"))
-        self.assertTrue(hasattr(d2_legacy, "val_dataloader"))
-        self.assertTrue(hasattr(d2_legacy, "test_dataloader"))
+        # Ensure we have valid windows
+        self.assertTrue(len(d2_global.valid_windows) > 0, "No valid windows found in dataset")
+
+        # Get a batch from the dataset
+        batch_global = d2_global.train_dataset.dataset[0]
+
+        # Check that batch is a tuple (x, y)
+        self.assertTrue(isinstance(batch_global, tuple))
+        self.assertEqual(len(batch_global), 2)
+
+        x_global, y_global = batch_global
+
+        # Check that unnecessary keys are not in the batch
+        unnecessary_keys = [
+            "idx_known_num",
+            "idx_unknown_num",
+            "idx_known_cat",
+            "idx_unknown_cat",
+            "categorical_cardinality_past",
+            "past_features",
+        ]
+
+        for key in unnecessary_keys:
+            self.assertNotIn(key, x_global, f"Key {key} should not be in batch output")
+
+        # Check that group_id is an integer
+        self.assertTrue(
+            isinstance(x_global["group_id"], int),
+            f"group_id should be an integer, got {type(x_global['group_id'])}",
+        )
+
+        # Check that time_idx is present for debugging
+        self.assertIn("time_idx", x_global)
+
+        # Now test with global_forecasting=False
+        d1_local = CustomD1TestLayer(global_forecasting=False)
+
+        d2_local = EncoderDecoder(
+            d1_dataset=d1_local,
+            past_len=3,  # Smaller past window
+            future_len=2,  # Smaller future window
+            batch_size=32,
+            precompute=True,
+        )
+
+        # Ensure we have valid windows
+        self.assertTrue(len(d2_local.valid_windows) > 0, "No valid windows found in dataset")
+
+        # Get a batch from the dataset
+        batch_local = d2_local.train_dataset.dataset[0]
+        x_local, y_local = batch_local
+
+        # With global_forecasting=False, group should be added to categorical features
+        self.assertIn("x_cat_past", x_local)
+        self.assertTrue(
+            x_local["x_cat_past"].shape[1] > 0,
+            "x_cat_past should not be empty with global_forecasting=False",
+        )
+
+        # Check that group_id is still an integer
+        self.assertTrue(isinstance(x_local["group_id"], int))
+
+        # Check that the D1 metadata reflects the group encoding
+        self.assertIn("group_cols", d1_local.metadata)
+
+        # Check that the D2 batch structure is consistent between global and local forecasting
+        # Both should have the same keys, just different values
+        self.assertEqual(set(x_global.keys()), set(x_local.keys()))
 
     def test_metadata_based_indices(self):
         """Test that D2 uses D1 metadata indices correctly."""
@@ -496,17 +669,9 @@ class TestEncoderDecoder(unittest.TestCase):
         item = d2_module.train_dataset.dataset[0]
         x = item[0]
 
-        # Check that index mappings are present
-        self.assertTrue("idx_known_num" in x)
-        self.assertTrue("idx_unknown_num" in x)
+        # Check that target index mapping is present and has correct dtype
         self.assertTrue("idx_target" in x)
-
-        # Check that indices are torch tensors with correct dtype
-        self.assertTrue(isinstance(x["idx_known_num"], torch.Tensor))
-        self.assertTrue(isinstance(x["idx_unknown_num"], torch.Tensor))
         self.assertTrue(isinstance(x["idx_target"], torch.Tensor))
-        self.assertEqual(x["idx_known_num"].dtype, torch.long)
-        self.assertEqual(x["idx_unknown_num"].dtype, torch.long)
         self.assertEqual(x["idx_target"].dtype, torch.long)
 
         # Check that target indices are valid for x_num_past
@@ -534,27 +699,12 @@ class TestEncoderDecoder(unittest.TestCase):
         has_categorical = len(self.cat_cols) > 0
 
         if has_categorical:
-            # Should have categorical tensors and mappings
+            # Should have categorical tensor and correct dtype
             self.assertTrue("x_cat_past" in x)
-            self.assertTrue("categorical_cardinality_past" in x)
-            self.assertTrue("idx_known_cat" in x)
-            self.assertTrue("idx_unknown_cat" in x)
-
-            # Check categorical tensor dtype
             self.assertEqual(x["x_cat_past"].dtype, torch.long)
-
-            # Check cardinality list
-            self.assertTrue(isinstance(x["categorical_cardinality_past"], list))
-            self.assertEqual(len(x["categorical_cardinality_past"]), x["x_cat_past"].shape[1])
-
-            # All cardinalities should be positive integers
-            for card in x["categorical_cardinality_past"]:
-                self.assertTrue(isinstance(card, int))
-                self.assertGreater(card, 0)
         else:
             # Should not have categorical keys when no categorical features
             self.assertNotIn("x_cat_past", x)
-            self.assertNotIn("categorical_cardinality_past", x)
 
     def test_future_features_handling(self):
         """Test handling of known future features."""
@@ -587,13 +737,6 @@ class TestEncoderDecoder(unittest.TestCase):
         if "x_num_future" in x:
             self.assertEqual(x["x_num_future"].dtype, torch.float32)
             self.assertEqual(x["x_num_future"].shape[0], d2_module.future_len)
-
-        # Check known/unknown index mappings
-        self.assertTrue("idx_known_num" in x)
-        self.assertTrue("idx_unknown_num" in x)
-
-        # Known indices should not be empty since we have known features
-        self.assertGreater(len(x["idx_known_num"]), 0)
 
     def test_empty_categorical_handling(self):
         """Test handling when no categorical features exist."""
