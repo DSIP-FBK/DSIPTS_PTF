@@ -59,15 +59,11 @@ class EncoderDecoderDataset(Dataset):
             try:
                 # Access the cat_cols property from D1 dataset
                 cat_cols_from_d1 = d1_dataset.cat_cols
-                print(f"DEBUG: D1 cat_cols: {cat_cols_from_d1}")
                 self.cat_feature_cols = cat_cols_from_d1 or []
-                print(f"DEBUG: Set cat_feature_cols to: {self.cat_feature_cols}")
-            except (AttributeError, TypeError) as e:
-                print(f"DEBUG: Error accessing cat_cols: {e}")
+            except (AttributeError, TypeError):
                 self.cat_feature_cols = []
         else:
             self.cat_feature_cols = cat_feature_cols
-            print(f"DEBUG: Using provided cat_feature_cols: {self.cat_feature_cols}")
 
     def __len__(self):
         """Return the number of valid windows."""
@@ -106,8 +102,25 @@ class EncoderDecoderDataset(Dataset):
         meta: Dict[str, Any] = getattr(self.d1_dataset, "metadata", {}) or {}
         idx_categorical: List[int] = list(meta.get("idx_categorical", []))
         idx_known_future: List[int] = list(meta.get("idx_known_future", []))
-        idx_unknown_future: List[int] = list(meta.get("idx_unknown_future", []))
+        # TODO: remove idx_unknown_feature?
+        idx_unknown_future: List[int] = list(meta.get("idx_unknown_future", []))  # noqa
         idx_targets_full: List[int] = list(meta.get("idx_targets", []))
+
+        # Get temporal features from metadata if available
+        enrich_cat = meta.get("enrich_cat", [])
+        feature_cols = meta.get("feature_cols", [])
+
+        # Ensure all temporal features are treated as categorical
+        # This is a safety check in case idx_categorical doesn't include them
+        if enrich_cat and feature_cols:
+            for temporal_feature in enrich_cat:
+                if temporal_feature in feature_cols:
+                    feature_idx = feature_cols.index(temporal_feature)
+                    if feature_idx not in idx_categorical:
+                        idx_categorical.append(feature_idx)
+                        logger.info(
+                            f"Added temporal feature '{temporal_feature}' (idx: {feature_idx}) to categorical indices"  # noqa
+                        )
 
         # Determine numeric feature indices as complement of categorical
         n_features = int(meta.get("n_features", group_sample["x"].shape[1]))
@@ -151,84 +164,24 @@ class EncoderDecoderDataset(Dataset):
             logger.warning("All targets mapped to non-numeric features; idx_target will be empty")
         x["idx_target"] = torch.tensor(mapped_targets, dtype=torch.long)
 
-        # Optional: provide index mappings for known/unknown relative to past feature splits
-        # Numeric index mappings (relative to x_num_past)
-        x["idx_known_num"] = (
-            torch.tensor(
-                [num_pos_map[i] for i in idx_known_future if i in num_pos_map], dtype=torch.long
-            )
-            if len(idx_known_future) > 0
-            else torch.zeros(0, dtype=torch.long)
-        )
-        x["idx_unknown_num"] = (
-            torch.tensor(
-                [num_pos_map[i] for i in idx_unknown_future if i in num_pos_map], dtype=torch.long
-            )
-            if len(idx_unknown_future) > 0
-            else torch.zeros(0, dtype=torch.long)
-        )
-
-        # Categorical index mappings (relative to x_cat_past)
-        if len(idx_categorical) > 0:
-            cat_pos_map = {orig: pos for pos, orig in enumerate(idx_categorical)}
-            x["idx_known_cat"] = (
-                torch.tensor(
-                    [cat_pos_map[i] for i in idx_known_future if i in cat_pos_map], dtype=torch.long
-                )
-                if len(idx_known_future) > 0
-                else torch.zeros(0, dtype=torch.long)
-            )
-            x["idx_unknown_cat"] = (
-                torch.tensor(
-                    [cat_pos_map[i] for i in idx_unknown_future if i in cat_pos_map],
-                    dtype=torch.long,
-                )
-                if len(idx_unknown_future) > 0
-                else torch.zeros(0, dtype=torch.long)
-            )
-
-        # Categorical cardinality ordered to match x_cat_past columns
-        categorical_cardinality_past: List[int] = []
-        cat_mappings = meta.get("categorical_mappings", {}) or {}
-        feature_cols_meta: List[str] = list(meta.get("feature_cols", []))
-        # Build feature_index -> cardinality map from metadata
-        featidx_to_card: Dict[int, int] = {}
-        for _col, mapping in cat_mappings.items():
-            try:
-                fi = int(mapping.get("feature_index", -1))
-                card = int(mapping.get("cardinality", 1))
-                if fi >= 0:
-                    featidx_to_card[fi] = card
-            except Exception:
-                continue
-        # Fallback: use D1 label_encoders if metadata lacks cardinality
-        label_encoders = getattr(self.d1_dataset, "label_encoders", None)
-        if len(idx_categorical) > 0:
-            for fi in idx_categorical:
-                card = featidx_to_card.get(fi)
-                if card is None and label_encoders is not None and feature_cols_meta:
-                    try:
-                        col_name = feature_cols_meta[fi]
-                        if col_name in label_encoders:
-                            enc = label_encoders[col_name]
-                            # LabelEncoder exposes classes_
-                            card = len(getattr(enc, "classes_", [])) or None
-                    except Exception:
-                        card = None
-                categorical_cardinality_past.append(int(card) if card is not None else 1)
-            x["categorical_cardinality_past"] = categorical_cardinality_past
-
         # Include target in decoder part if requested (for select models)
         if self.include_target_in_decoder and self.future_len > 0:
             x["decoder_target"] = future_targets.float()
 
         # Backward compatibility keys (kept for existing code)
-        x["past_features"] = X_past
         x["future_targets"] = future_targets.float()
 
-        # Essential metadata
-        x["group_id"] = window.get("group_id", 0)
-        x["time_idx"] = torch.arange(self.past_len)[-1].item()  # Last time index
+        # Debug information (for tracing back to original CSV data)
+        # Keep group_id as integer for consistency and debugging
+        group_id = window.get("group_id", 0)
+        if isinstance(group_id, str):
+            # Convert string group_id to integer using group mapping if available
+            meta_group_mapping = meta.get("group_mapping", {})
+            group_id = meta_group_mapping.get(group_id, 0)
+        x["group_id"] = int(group_id)  # Keep for debugging
+
+        # Use actual start index from window for debugging (trace back to original CSV)
+        x["time_idx"] = start_idx  # Actual start index in original data for debugging
 
         # Target tensor (for loss computation)
         y = future_targets
