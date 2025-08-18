@@ -357,14 +357,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Enrich with temporal features if requested and time_col is datetime
         if self.enrich_cat and pd.api.types.is_datetime64_any_dtype(chunk[self.time_col]):
             chunk = self._enrich_temporal_features(chunk)
-
-        # Always sort by time_col
-        chunk = chunk.sort_values(by=self.time_col).reset_index(drop=True)
+            # Update encoders with enriched features
+            self._update_encoders(chunk)
 
         # Set of mandatory columns (cat, num, target, group, time)
-        mandatory_cols = set(self.cat_cols or [])
-        mandatory_cols.update(self._num_cols or [])
-        mandatory_cols.update(self.target_cols or [])
+        mandatory_cols = set(self._cat_cols + self._num_cols + self._target_cols)
 
         # Always include time column
         if self.time_col and self.time_col in chunk.columns:
@@ -716,7 +713,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.total_length += group_length
 
             # Update categorical encoders
-        self._update_encoders(group_data)
+            self._update_encoders(group_data)
 
     def _update_encoders(self, data):
         """
@@ -777,6 +774,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                                 f"Updated label encoder for column '{col}'"
                                 f"with {len(new_values)} new categories"
                             )
+                # logger.info(f"Updated LE for {col} here is: {self.label_encoders[col].classes_}")
 
     def _apply_label_encoding(self, data):
         """Apply label encoding to categorical columns in the data.
@@ -1170,14 +1168,14 @@ class MultiSourceTSDataSet(BaseD1Layer):
             file_group_key: Tuple of (file_idx, group_key)
 
         Returns:
-            DataFrame containing the group's data
+            DataFrame containing the group data
         """
         file_idx, group_key = file_group_key
         file_path = self.file_paths[file_idx]
 
-        # Load the entire file
+        # Load and preprocess entire file (parse time, enrich temporal, update encoders)
         df = pd.read_csv(file_path)
-
+        """ TODO: Remove this commented code if logic works
         # Handle grouping logic (same as DataFrame approach)
         if not self.group_cols:
             # No group columns - return entire file
@@ -1197,6 +1195,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Apply enrichment and processing
         return self._parse_and_enrich_chunk(group_data)
+        """
+        df = self._enrich_temporal_features(df)
+
+        # Extract and process group data
+        group_data = self._extract_group_data(df, group_key)
+        return group_data
 
     def _extract_group_data(self, df, group_key):
         """
@@ -1257,19 +1261,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Processed DataFrame
         """
-        # Apply categorical encodings
-        for col in self.cat_cols:
-            if col in group_data.columns and col in self.label_encoders:
-                # Handle NaN values
-                non_null_mask = group_data[col].notna()
-                if non_null_mask.any():
-                    # Transform non-null values
-                    values_to_transform = (
-                        group_data.loc[non_null_mask, col].astype(str).values.reshape(-1, 1)
-                    )
-                    encoded_values = self.label_encoders[col].transform(values_to_transform)
-                    group_data.loc[non_null_mask, col] = encoded_values.flatten()
-
         return group_data
 
     def _infer_frequency(self, time_col_data):
@@ -1364,7 +1355,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Extract all features and targets for this group efficiently
         if len(group_data) == 0:
-            logger.warning(f"Empty group data found for group {group_id}.")  # noqa
+            logger.warning(f"Empty group data found for group {group_id}.")
             x = torch.empty(0, len(self.feature_cols), dtype=torch.float32)
             y = torch.empty(0, len(self.target_cols), dtype=torch.float32)
             time_indices = []
@@ -1383,7 +1374,16 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
             # Extract categorical features if they exist
             if cat_feature_cols:
-                cat_feature_values = group_data[cat_feature_cols].values
+                # Apply label encoding to categorical features only at retrieval time
+                encoded_cat_data = group_data[cat_feature_cols].copy()
+                for col in cat_feature_cols:
+                    if col in self.label_encoders:
+                        le = self.label_encoders[col]
+                        values_str = group_data[col].astype(str)
+                        # Safe mapping: unknown categories -> -1
+                        mapping = {cls: i for i, cls in enumerate(le.classes_)}
+                        encoded_cat_data[col] = values_str.map(mapping).fillna(-1).astype(int)
+                cat_feature_values = encoded_cat_data.values
                 x_cat = torch.tensor(cat_feature_values, dtype=torch.long)
                 # Combine numerical and categorical features
                 x = torch.cat([x_num, x_cat.float()], dim=-1)
@@ -1427,11 +1427,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Load the file (could be cached at file level)
         df = pd.read_csv(file_path)
-        df = self._enrich_temporal_features(df)
+        df = self._parse_and_enrich_chunk(df)
 
-        # Extract and process group data
+        # Extract group data without applying encoding
         group_data = self._extract_group_data(df, group_key)
-        processed_data = self._process_group_data(group_data)
-
-        # Apply label encoding to categorical columns
-        return self._apply_label_encoding(processed_data)
+        return group_data
