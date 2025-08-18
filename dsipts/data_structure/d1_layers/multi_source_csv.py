@@ -759,6 +759,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                                 f"Created label encoder for enriched feature '{col}'"
                                 f"with {len(unique_values)} categories"
                             )
+                            logger.info(f"the unique values are: {unique_values}")
                         else:
                             logger.info(
                                 f"Created label encoder for categorical column '{col}'"
@@ -1151,7 +1152,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
             group_data = df[mask].copy()
         elif isinstance(self.group_cols, list) and len(self.group_cols) == 1:
             # Single column in list
-            group_data = df[df[self.group_cols[0]] == group_key].copy()
+            # Extract the actual group value from the tuple
+            actual_group_value = group_key[0] if isinstance(group_key, tuple) else group_key
+            group_data = df[df[self.group_cols[0]] == actual_group_value].copy()
         else:
             # Single column as string
             group_data = df[df[self.group_cols] == group_key].copy()
@@ -1185,7 +1188,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
             group_data = df[mask].copy()
         elif isinstance(self.group_cols, list) and len(self.group_cols) == 1:
             # Single column in list
-            group_data = df[df[self.group_cols[0]] == group_key].copy()
+            # Extract the actual group value from the tuple
+            actual_group_value = group_key[0] if isinstance(group_key, tuple) else group_key
+            group_data = df[df[self.group_cols[0]] == actual_group_value].copy()
         else:
             # Single column as string
             group_data = df[df[self.group_cols] == group_key].copy()
