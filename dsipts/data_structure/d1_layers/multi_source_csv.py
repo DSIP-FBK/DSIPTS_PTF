@@ -109,10 +109,15 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if group_cols is None or (isinstance(group_cols, list) and len(group_cols) == 0):
             self._group_cols = []
             logger.info("No group columns provided, using default grouping")
+            if global_forecasting:
+                logger.info("Since there are no groups, cant proceed with global forecasting.")
+                raise ValueError("Global forecasting requires group columns")
         elif isinstance(group_cols, str):
             self._group_cols = [group_cols]
+            logger.info(f"Group column utilised during init: {group_cols}")
         else:
             self._group_cols = group_cols
+            logger.info(f"Group columns utilised during init: {group_cols}")
 
         # Initialize attributes with proper defaults
         self._target_cols = target_cols or []
@@ -172,30 +177,56 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Priority: known_cols > (num_cols + cat_cols) > headers
         """
         logger = logging.getLogger(__name__)
+        logger.info("Inferring feature columns now!")
 
-        # Priority 1: Use known_cols if specified
-        if self._known_cols:
-            feature_cols = list(self._known_cols)
+        # Priority 1: Use known_cols, num_cols and cat_cols and enrich_cat if specified
+        # Approach 1: excluding targets from features (needs separate logic for index cal then)
+        """
+        if self._known_cols or self._num_cols or self._cat_cols:
+            feature_cols = list(dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols))
+            logger.info(f"Feature cols: known_cols + num_cols + cat_cols: {feature_cols}")
             # Add temporal features if specified
             if self.enrich_cat:
                 feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
-            logger.info(f"Using known_cols as feature columns: {feature_cols}")
+                logger.info(f"Updated feature columns after adding enrich_cat: {feature_cols}")
+            return feature_cols
+        """
+
+        # Priority 1: (known_cols, num_cols & cat_cols & target_cols) and (enrich_cat) if specified
+        # Approach 2: including targets (automatically handles the index cal logic with crrent code)
+        if self._known_cols or self._num_cols or self._cat_cols or self.target_cols:
+            feature_cols = list(
+                dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols + self.target_cols)
+            )
+            logger.info(
+                f"Feature cols: known_cols + num_cols + cat_cols + target_cols: {feature_cols}"
+            )
+            # Add temporal features if specified
+            if self.enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+                logger.info(f"Updated feature columns after adding enrich_cat: {feature_cols}")
             return feature_cols
 
+        """
         # Priority 2: Use num_cols + cat_cols if specified
         if self._num_cols or self._cat_cols:
             feature_cols = list(set(self._num_cols + self._cat_cols))
             # Include target columns in features (they can be both features and targets)
             feature_cols = list(dict.fromkeys(feature_cols + self._target_cols))
+            logger.info(
+                f"num_cols + cat_cols + target_cols as feature columns: {feature_cols}"
+            )
             # Add temporal features if specified
             if self.enrich_cat:
                 feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
-            logger.info(
-                f"Using num_cols + cat_cols + target_cols as feature columns: {feature_cols}"
-            )
+                logger.info(
+                    f"Updated feature columns after adding enrich_cat: {feature_cols}"
+                )
             return feature_cols
+        """
 
         # Priority 3: Infer from headers (files or dataframes)
+        # #TODO: needs improvements, how to reach columns when dataframes are provided.
         logger.info("Inferring feature columns from headers...")
 
         if self.use_dataframes:
@@ -233,22 +264,40 @@ class MultiSourceTSDataSet(BaseD1Layer):
         return feature_cols
 
     def _apply_global_forecasting_logic(self):
-        """Apply global forecasting logic: if global_forecasting=False and multiple groups exist,
-        add group columns to categorical and known variables."""
+        """Apply global forecasting logic based on groups and global_forecasting flag.
+
+        Main flow logic:
+        - If groups are not given: local forecasting (no special handling needed)
+        - If groups are given and global_forecasting=True: global forecasting (no special handling)
+        - If groups are given and global_forecasting=False: local forecasting
+          -> Treat groups as categorical known values
+          -> Add to categorical and known columns lists
+          -> Apply label encoding later in processing
+        """
         logger = logging.getLogger(__name__)
 
-        # Only apply logic if global_forecasting is False and we have group columns
-        if self.global_forecasting or not self._group_cols:
+        # Case 1: No groups provided - local forecasting by default
+        if not self._group_cols:
+            logger.info("No group columns provided - using local forecasting")
             return
 
-        logger.info(f"Global forecasting disabled with group columns {self._group_cols}")
-        logger.info("Adding group columns to categorical and known variables for local forecasting")
+        # Case 2: Groups provided and global forecasting enabled
+        if self.global_forecasting:
+            logger.info(f"Global forecasting enabled with group columns {self._group_cols}")
+            logger.info("Groups will be used for global model training")
+            return
 
-        # Add group columns to categorical columns (groups need encoding)
+        # Case 3: Groups provided but global forecasting disabled - local forecasting
+        logger.info(f"Local forecasting with group columns {self._group_cols}")
+        logger.info("Groups will be treated as categorical known values for local forecasting")
+
+        # Add group columns to categorical columns (groups need label encoding)
         for group_col in self._group_cols:
             if group_col not in self._cat_cols:
                 self._cat_cols.append(group_col)
-                logger.info(f"Added group column '{group_col}' to categorical columns")
+                logger.info(
+                    f"Added group column '{group_col}' to categorical columns for label encoding"
+                )
 
         # Add group columns to known columns (group identity is known at prediction time)
         for group_col in self._group_cols:
@@ -336,6 +385,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         Enrich dataset with temporal categorical features.
 
+        When enrichment is done, new features are added as categorical known values.
+        These need to be updated in categorical and known columns lists and
+        label encoding should be applied to these new features.
+
         Args:
             dataset: DataFrame to enrich
 
@@ -353,15 +406,20 @@ class MultiSourceTSDataSet(BaseD1Layer):
             return dataset
 
         # Add temporal features directly without mapping dict
+        enriched_features = []
         for column in self.enrich_cat:
             if column == "hour":
                 dataset[column] = dataset[self.time_col].dt.hour
+                enriched_features.append(column)
             elif column == "dow":
                 dataset[column] = dataset[self.time_col].dt.dayofweek
+                enriched_features.append(column)
             elif column == "month":
                 dataset[column] = dataset[self.time_col].dt.month
+                enriched_features.append(column)
             elif column == "minute":
                 dataset[column] = dataset[self.time_col].dt.minute
+                enriched_features.append(column)
             else:
                 if column not in dataset.columns:
                     logger.error(
@@ -369,17 +427,31 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     )
 
         # Add temporal categorical features to cat_cols and known_cols only once
-        if self.enrich_cat and not self._is_file_read:
+        if enriched_features and not self._is_file_read:
             if self._cat_cols is None:
                 self._cat_cols = []
-            self._cat_cols.extend(self.enrich_cat)
 
-            # Also add to known_cols since these are always known
+            # Add enriched features to categorical columns (they need label encoding)
+            for feature in enriched_features:
+                if feature not in self._cat_cols:
+                    self._cat_cols.append(feature)
+
+            # Also add to known_cols since temporal features are always known at prediction time
             if self._known_cols is not None:
-                self._known_cols.extend(self.enrich_cat)
+                for feature in enriched_features:
+                    if feature not in self._known_cols:
+                        self._known_cols.append(feature)
 
             self._is_file_read = True
-            logger.info(f"Added temporal categorical features to columns: {self.enrich_cat}")
+            logger.info(
+                f"Added temporal categorical features to categorical columns: {enriched_features}"
+            )
+            logger.info(
+                f"Added temporal categorical features to known columns: {enriched_features}"
+            )
+            logger.info(
+                "Label encoding will be applied to these enriched features during processing"
+            )
 
         return dataset
 
@@ -644,34 +716,111 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.total_length += group_length
 
             # Update categorical encoders
-            self._update_encoders(group_data)
+        self._update_encoders(group_data)
 
     def _update_encoders(self, data):
         """
         Update label encoders with new categorical data.
+        This method applies label encoding to:
+        1. Group columns (when treated as categorical in local forecasting)
+        2. Original categorical columns
+        3. Enriched temporal categorical features
+
+        The encoders are stored and can be used later for decoding.
 
         Args:
             data: DataFrame containing the data to update encoders with
         """
         for col in self.cat_cols:
             if col in data.columns:
-                # Get non-null values
+                # Get non-null values and convert to string for consistent encoding
                 values = data[col].dropna().astype(str)
                 if len(values) > 0:
                     if col not in self.label_encoders:
+                        # Create new encoder for this column
                         self.label_encoders[col] = LabelEncoder()
-                        self.label_encoders[col].handle_unknown = "use_encoded_value"
-                        self.label_encoders[col].unknown_value = -1
+                        # Set up handling for unknown values
+                        if hasattr(self.label_encoders[col], "handle_unknown"):
+                            self.label_encoders[col].handle_unknown = "use_encoded_value"
+                            self.label_encoders[col].unknown_value = -1
+
                         # Fit with initial values
-                        self.label_encoders[col].fit(values.values.reshape(-1, 1))
+                        unique_values = values.unique()
+                        self.label_encoders[col].fit(unique_values)
+
+                        # Log encoder creation
+                        if col in self._group_cols:
+                            logger.info(
+                                f"Created label encoder for group column '{col}'"
+                                f"with {len(unique_values)} categories"
+                            )
+                        elif col in (self.enrich_cat or []):
+                            logger.info(
+                                f"Created label encoder for enriched feature '{col}'"
+                                f"with {len(unique_values)} categories"
+                            )
+                        else:
+                            logger.info(
+                                f"Created label encoder for categorical column '{col}'"
+                                f"with {len(unique_values)} categories"
+                            )
                     else:
-                        # Update encoder with new values
+                        # Update existing encoder with new values
                         existing_categories = set(self.label_encoders[col].classes_)
                         new_values = set(values.unique()) - existing_categories
                         if new_values:
                             # Refit with all values (existing + new)
                             all_values = list(existing_categories) + list(new_values)
-                            self.label_encoders[col].fit(np.array(all_values).reshape(-1, 1))
+                            self.label_encoders[col].fit(np.array(all_values))
+                            logger.debug(
+                                f"Updated label encoder for column '{col}'"
+                                f"with {len(new_values)} new categories"
+                            )
+
+    def _apply_label_encoding(self, data):
+        """Apply label encoding to categorical columns in the data.
+
+        This method transforms categorical values to their encoded integer representations
+        using the fitted label encoders.
+
+        Args:
+            data: DataFrame to apply encoding to
+
+        Returns:
+            DataFrame with categorical columns encoded
+        """
+        data_encoded = data.copy()
+
+        for col in self.cat_cols:
+            if col in data_encoded.columns and col in self.label_encoders:
+                # Get non-null values
+                non_null_mask = data_encoded[col].notna()
+                if non_null_mask.any():
+                    # Convert to string for consistent encoding
+                    values_to_encode = data_encoded.loc[non_null_mask, col].astype(str)
+
+                    try:
+                        # Apply label encoding
+                        encoded_values = self.label_encoders[col].transform(values_to_encode)
+                        data_encoded.loc[non_null_mask, col] = encoded_values
+
+                        # Log encoding application
+                        if col in self._group_cols:
+                            logger.debug(f"Applied label encoding to group column '{col}'")
+                        elif col in (self.enrich_cat or []):
+                            logger.debug(f"Applied label encoding to enriched feature '{col}'")
+                        else:
+                            logger.debug(f"Applied label encoding to categorical column '{col}'")
+
+                    except ValueError as e:
+                        logger.warning(f"Could not encode column '{col}': {e}")
+                        # Handle unknown categories by assigning -1 or keeping original values
+                        if hasattr(self.label_encoders[col], "unknown_value"):
+                            data_encoded.loc[non_null_mask, col] = self.label_encoders[
+                                col
+                            ].unknown_value
+
+        return data_encoded
 
     def _get_categorical_cardinality(self, col):
         """
@@ -767,14 +916,28 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info("CALCULATING FEATURE INDICES...")
 
         # Get indices of different feature types within the feature_cols list
-        cat_indices = [i for i, col in enumerate(self.feature_cols) if col in self.cat_cols]
+        # NOTE: Preserve the order of the source lists (cat/known/unknown/target)
+        # by mapping each column to its index in feature_cols, filtering to existing columns.
+        cat_indices = [
+            self.feature_cols.index(col)
+            for col in (self.cat_cols or [])
+            if col in self.feature_cols
+        ]
         known_indices = [
-            i for i, col in enumerate(self.feature_cols) if col in (self.known_cols or [])
+            self.feature_cols.index(col)
+            for col in (self.known_cols or [])
+            if col in self.feature_cols
         ]
         unknown_indices = [
-            i for i, col in enumerate(self.feature_cols) if col in (self.unknown_cols or [])
+            self.feature_cols.index(col)
+            for col in (self.unknown_cols or [])
+            if col in self.feature_cols
         ]
-        target_indices = [i for i, col in enumerate(self.feature_cols) if col in self.target_cols]
+        target_indices = [
+            self.feature_cols.index(col)
+            for col in (self.target_cols or [])
+            if col in self.feature_cols
+        ]
 
         logger.info(f"Categorical feature indices: {cat_indices}")
         logger.info(f"Known future feature indices: {known_indices}")
@@ -825,7 +988,45 @@ class MultiSourceTSDataSet(BaseD1Layer):
             categorical_mappings = {}
 
             for col in self.cat_cols:
-                if col in self.label_encoders:
+                # Special handling for group columns - use known group metadata
+                if col in self.group_cols and hasattr(self, "group_info") and self.group_info:
+                    # Extract all unique group values from group_info
+                    group_values = set()
+                    for group_key, info in self.group_info.items():
+                        if "original_values" in info and info["group_columns"] == self.group_cols:
+                            # For single group column, extract the value
+                            if len(info["original_values"]) == 1:
+                                group_values.add(str(info["original_values"][0]))
+
+                    # Ensure we have all group values
+                    group_values = sorted(list(group_values))
+                    n_categories = len(group_values)
+                    cardinalities[col] = n_categories
+
+                    # Update or create label encoder with all group values
+                    if col not in self.label_encoders:
+                        self.label_encoders[col] = LabelEncoder()
+                        if hasattr(self.label_encoders[col], "handle_unknown"):
+                            self.label_encoders[col].handle_unknown = "use_encoded_value"
+                            self.label_encoders[col].unknown_value = -1
+
+                    # Fit encoder with all group values
+                    self.label_encoders[col].fit(group_values)
+
+                    # Store the actual category mappings for reference
+                    categorical_mappings[col] = {
+                        "categories": group_values,
+                        "cardinality": n_categories,
+                        "feature_index": self.feature_cols.index(col)
+                        if col in self.feature_cols
+                        else -1,
+                    }
+
+                    logger.info(
+                        f"  - {col}: {n_categories} categories"
+                        f"{group_values[:5]}{'...' if n_categories > 5 else ''}"
+                    )
+                elif col in self.label_encoders:
                     categories = self.label_encoders[col].classes_
                     n_categories = len(categories)
                     cardinalities[col] = n_categories
@@ -1225,4 +1426,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Extract and process group data
         group_data = self._extract_group_data(df, group_key)
-        return self._process_group_data(group_data)
+        processed_data = self._process_group_data(group_data)
+
+        # Apply label encoding to categorical columns
+        return self._apply_label_encoding(processed_data)
