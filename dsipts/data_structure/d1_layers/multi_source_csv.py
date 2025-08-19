@@ -1178,6 +1178,30 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Load and preprocess entire file (parse time, enrich temporal, update encoders)
         df = pd.read_csv(file_path)
+        """ TODO: Remove this commented code if logic works
+        # Handle grouping logic (same as DataFrame approach)
+        if not self.group_cols:
+            # No group columns - return entire file
+            group_data = df.copy()
+        elif isinstance(self.group_cols, list) and len(self.group_cols) > 1:
+            # Multi-column grouping
+            mask = df[self.group_cols].apply(lambda x: tuple(x), axis=1) == group_key
+            group_data = df[mask].copy()
+        elif isinstance(self.group_cols, list) and len(self.group_cols) == 1:
+            # Single column in list
+            # Extract the actual group value from the tuple
+            actual_group_value = group_key[0] if isinstance(group_key, tuple) else group_key
+            group_data = df[df[self.group_cols[0]] == actual_group_value].copy()
+        else:
+            # Single column as string
+            group_data = df[df[self.group_cols] == group_key].copy()
+
+        # Apply enrichment and processing
+        return self._parse_and_enrich_chunk(group_data)
+
+        df = self._enrich_temporal_features(df)
+        """
+        # Extract and process group data
         df = self._parse_and_enrich_chunk(df)
 
         # Extract group data without applying encoding
