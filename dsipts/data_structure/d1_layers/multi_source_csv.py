@@ -94,8 +94,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.file_paths = file_paths or []
         self.dataframes = dataframes or []
         self.use_dataframes = bool(dataframes)
-        self.time_col = time_col
-        self.weights = weights
+        self._time_col = time_col
+        self._weights = weights
 
         # Create pseudo file paths for dataframes for consistent processing
         if self.use_dataframes:
@@ -121,11 +121,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Initialize attributes with proper defaults
         self._target_cols = target_cols or []
-        self._time_col = time_col
+        # self._time_col = time_col
         self._cat_cols = cat_cols or []
         self._num_cols = num_cols or []
-        self._enrich_cat = enrich_cat
-        self.enrich_cat = enrich_cat or []
+        self._enrich_cat = enrich_cat or []
         self.global_forecasting = global_forecasting
 
         # Handle group columns properly (already set self._group_cols above)
@@ -186,24 +185,26 @@ class MultiSourceTSDataSet(BaseD1Layer):
             feature_cols = list(dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols))
             logger.info(f"Feature cols: known_cols + num_cols + cat_cols: {feature_cols}")
             # Add temporal features if specified
-            if self.enrich_cat:
-                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+            if self._enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
                 logger.info(f"Updated feature columns after adding enrich_cat: {feature_cols}")
             return feature_cols
         """
 
         # Priority 1: (known_cols, num_cols & cat_cols & target_cols) and (enrich_cat) if specified
         # Approach 2: including targets (automatically handles the index cal logic with crrent code)
-        if self._known_cols or self._num_cols or self._cat_cols or self.target_cols:
+        if self._known_cols or self._num_cols or self._cat_cols or self._target_cols:
             feature_cols = list(
-                dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols + self.target_cols)
+                dict.fromkeys(
+                    self._known_cols + self._num_cols + self._cat_cols + self._target_cols
+                )
             )
             logger.info(
                 f"Feature cols: known_cols + num_cols + cat_cols + target_cols: {feature_cols}"
             )
             # Add temporal features if specified
-            if self.enrich_cat:
-                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+            if self._enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
                 logger.info(f"Updated feature columns after adding enrich_cat: {feature_cols}")
             return feature_cols
 
@@ -217,8 +218,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 f"num_cols + cat_cols + target_cols as feature columns: {feature_cols}"
             )
             # Add temporal features if specified
-            if self.enrich_cat:
-                feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+            if self._enrich_cat:
+                feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
                 logger.info(
                     f"Updated feature columns after adding enrich_cat: {feature_cols}"
                 )
@@ -247,16 +248,18 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Exclude special columns from features
         special_columns = set()
+        """
         if self._time_col:
             special_columns.add(self._time_col)
-        if self.weights:
-            special_columns.add(self.weights)
+        """
+        if self._weights:
+            special_columns.add(self._weights)
 
         # Include all columns except special ones
         feature_cols = [col for col in all_columns if col not in special_columns]
         # Add temporal features if specified
-        if self.enrich_cat:
-            feature_cols = list(dict.fromkeys(feature_cols + self.enrich_cat))
+        if self._enrich_cat:
+            feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
 
         logger.info(f"Inferred feature columns from headers: {feature_cols}")
         logger.info(f"Excluded special columns: {list(special_columns)}")
@@ -308,12 +311,20 @@ class MultiSourceTSDataSet(BaseD1Layer):
     def _validate_enrich_cat(self):
         """Validate the enrich_cat parameter."""
         valid_enrich_options = ["hour", "dow", "month", "minute"]
-        for option in self.enrich_cat:
+        for option in self._enrich_cat:
             if option not in valid_enrich_options:
                 raise ValueError(
                     f"Invalid enrich_cat option: {option}. "
                     f"Valid options are: {valid_enrich_options}"
                 )
+            elif option not in self._cat_cols:
+                self._cat_cols.append(option)
+                logger.info(f"Categorical columns updated after enrichment: {self._cat_cols}")
+            elif option not in self._known_cols:
+                self._known_cols.append(option)
+                logger.info(f"Known columns updated after enrichment: {self._known_cols}")
+            else:
+                logger.info(f"Enrichment option {option} already in categorical columns")
 
     def _parse_and_enrich_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """
@@ -326,36 +337,36 @@ class MultiSourceTSDataSet(BaseD1Layer):
             Processed DataFrame chunk
         """
         # If time_col is missing, create one as integer range and set as time_col
-        if self.time_col not in chunk.columns:
+        if self._time_col not in chunk.columns:
             logger.info(
-                f"Time column '{self.time_col}' not found."
+                f"Time column '{self._time_col}' not found."
                 f"Creating 'time' column as integer range."
             )
             chunk["time"] = range(len(chunk))
-            self.time_col = "time"
+            self._time_col = "time"
 
         # Now, handle the time column type
-        if not pd.api.types.is_datetime64_any_dtype(chunk[self.time_col]):
+        if not pd.api.types.is_datetime64_any_dtype(chunk[self._time_col]):
             try:
-                chunk[self.time_col] = pd.to_datetime(chunk[self.time_col])
-                logger.info(f"Converted '{self.time_col}' to datetime.")
+                chunk[self._time_col] = pd.to_datetime(chunk[self._time_col])
+                logger.info(f"Converted '{self._time_col}' to datetime.")
             except Exception as e:
                 # If conversion fails, check if int/float
                 if pd.api.types.is_integer_dtype(
-                    chunk[self.time_col]
-                ) or pd.api.types.is_float_dtype(chunk[self.time_col]):
+                    chunk[self._time_col]
+                ) or pd.api.types.is_float_dtype(chunk[self._time_col]):
                     logger.info(
-                        f"Time column '{self.time_col}' is numeric (int/float)."
+                        f"Time column '{self._time_col}' is numeric (int/float)."
                         f"Proceeding as numeric time."
                     )
                 else:
                     logger.warning(
-                        f"Time column '{self.time_col}' cant be converted to datetime."
+                        f"Time column '{self._time_col}' cant be converted to datetime."
                         f"Its not numerical, Temporal enrichment skipped! Error: {e}"
                     )
 
         # Enrich with temporal features if requested and time_col is datetime
-        if self.enrich_cat and pd.api.types.is_datetime64_any_dtype(chunk[self.time_col]):
+        if self._enrich_cat and pd.api.types.is_datetime64_any_dtype(chunk[self._time_col]):
             chunk = self._enrich_temporal_features(chunk)
             # Update encoders with enriched features
             self._update_encoders(chunk)
@@ -364,8 +375,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         mandatory_cols = set(self._cat_cols + self._num_cols + self._target_cols)
 
         # Always include time column
-        if self.time_col and self.time_col in chunk.columns:
-            mandatory_cols.add(self.time_col)
+        if self._time_col and self._time_col in chunk.columns:
+            mandatory_cols.add(self._time_col)
 
         # Always include group columns
         if isinstance(self.group_cols, list):
@@ -392,30 +403,31 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Dataset enriched with temporal categorical features
         """
-        if not self.enrich_cat or self.time_col not in dataset.columns:
+        logger.info(f"xxx Categorical columns before temporal enrichment: {self._cat_cols}")
+        if not self._enrich_cat or self._time_col not in dataset.columns:
             return dataset
 
         # Ensure time column is datetime (should already be handled by _parse_and_enrich_chunk)
-        if not pd.api.types.is_datetime64_any_dtype(dataset[self.time_col]):
+        if not pd.api.types.is_datetime64_any_dtype(dataset[self._time_col]):
             logger.warning(
-                f"Time column {self.time_col} is not datetime type for temporal enrichment"
+                f"Time column {self._time_col} is not datetime type for temporal enrichment"
             )
             return dataset
 
         # Add temporal features directly without mapping dict
         enriched_features = []
-        for column in self.enrich_cat:
+        for column in self._enrich_cat:
             if column == "hour":
-                dataset[column] = dataset[self.time_col].dt.hour
+                dataset[column] = dataset[self._time_col].dt.hour
                 enriched_features.append(column)
             elif column == "dow":
-                dataset[column] = dataset[self.time_col].dt.dayofweek
+                dataset[column] = dataset[self._time_col].dt.dayofweek
                 enriched_features.append(column)
             elif column == "month":
-                dataset[column] = dataset[self.time_col].dt.month
+                dataset[column] = dataset[self._time_col].dt.month
                 enriched_features.append(column)
             elif column == "minute":
-                dataset[column] = dataset[self.time_col].dt.minute
+                dataset[column] = dataset[self._time_col].dt.minute
                 enriched_features.append(column)
             else:
                 if column not in dataset.columns:
@@ -432,12 +444,16 @@ class MultiSourceTSDataSet(BaseD1Layer):
             for feature in enriched_features:
                 if feature not in self._cat_cols:
                     self._cat_cols.append(feature)
+                    logger.info(f"Updated cat columns with enriched values: {self._enrich_cat}")
 
             # Also add to known_cols since temporal features are always known at prediction time
             if self._known_cols is not None:
                 for feature in enriched_features:
                     if feature not in self._known_cols:
                         self._known_cols.append(feature)
+                        logger.info(
+                            f"Updated known features with enriched values: {self._known_cols}"
+                        )
 
             self._is_file_read = True
             logger.info(
@@ -449,7 +465,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             logger.info(
                 "Label encoding will be applied to these enriched features during processing"
             )
-
+        logger.info(f"xxx Categorical columns after temporal enrichment:  {self._cat_cols}")
         return dataset
 
     @property
@@ -728,7 +744,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Args:
             data: DataFrame containing the data to update encoders with
         """
-        for col in self.cat_cols:
+        for col in self._cat_cols:
             if col in data.columns:
                 # Get non-null values and convert to string for consistent encoding
                 values = data[col].dropna().astype(str)
@@ -751,7 +767,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                                 f"Created label encoder for group column '{col}'"
                                 f"with {len(unique_values)} categories"
                             )
-                        elif col in (self.enrich_cat or []):
+                        elif col in (self._enrich_cat or []):
                             logger.info(
                                 f"Created label encoder for enriched feature '{col}'"
                                 f"with {len(unique_values)} categories"
@@ -790,7 +806,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         data_encoded = data.copy()
 
-        for col in self.cat_cols:
+        for col in self._cat_cols:
             if col in data_encoded.columns and col in self.label_encoders:
                 # Get non-null values
                 non_null_mask = data_encoded[col].notna()
@@ -806,7 +822,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         # Log encoding application
                         if col in self._group_cols:
                             logger.debug(f"Applied label encoding to group column '{col}'")
-                        elif col in (self.enrich_cat or []):
+                        elif col in (self._enrich_cat or []):
                             logger.debug(f"Applied label encoding to enriched feature '{col}'")
                         else:
                             logger.debug(f"Applied label encoding to categorical column '{col}'")
@@ -862,10 +878,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info("\n" + "=" * 80)
         logger.info("D1 LAYER - DATASET CONFIGURATION")
         logger.info("=" * 80)
-        logger.info(f"Time Column: {self.time_col}")
-        logger.info(f"Target Columns: {self.target_cols}")
+        logger.info(f"Time Column: {self._time_col}")
+        logger.info(f"Target Columns: {self._target_cols}")
         logger.info(f"Feature Columns: {self.feature_cols}")
-        logger.info(f"Categorical Columns: {self.cat_cols}")
+        logger.info(f"Categorical Columns: {self._cat_cols}")
         logger.info(f"Known Future Columns: {self.known_cols}")
         logger.info(f"Unknown Future Columns: {self.unknown_cols}")
         logger.info(f"Group Columns: {self.group_cols}")
@@ -887,8 +903,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             group_length = self.group_info[file_group_key]["length"]
             self.cumulative_lengths.append(self.cumulative_lengths[-1] + group_length)
 
-        logger.info(f"Total samples across all groups: {self.cumulative_lengths[-1]}")
-
         # Store total dataset length
         self.dataset_length = self.cumulative_lengths[-1]
 
@@ -900,10 +914,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info(f"Number of Files: {len(self.file_paths)}")
         logger.info(f"Number of Features: {len(self.feature_cols)}")
         logger.info(f"Values of Features: {self.feature_cols}")
-        logger.info(f"Number of Targets: {len(self.target_cols)}")
-        logger.info(f"Values of Targets: {self.target_cols}")
-        logger.info(f"Number of Categorical Columns: {len(self.cat_cols)}")
-        logger.info(f"Values of Categorical Columns: {self.cat_cols}")
+        logger.info(f"Number of Targets: {len(self._target_cols)}")
+        logger.info(f"Values of Targets: {self._target_cols}")
+        logger.info(f"Number of Categorical Columns: {len(self._cat_cols)}")
+        logger.info(f"Values of Categorical Columns: {self._cat_cols}")
 
         # Log memory usage if data is cached
         if hasattr(self, "cached_data") and self.cached_data:
@@ -914,57 +928,40 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         logger.info("-" * 80 + "\n")
 
-        # Calculate feature indices for metadata
-        logger.info("CALCULATING FEATURE INDICES...")
-
-        # Get indices of different feature types within the feature_cols list
-        # NOTE: Preserve the order of the source lists (cat/known/unknown/target)
-        # by mapping each column to its index in feature_cols, filtering to existing columns.
+        # Calculate feature indices
         cat_indices = [
             self.feature_cols.index(col)
-            for col in (self.cat_cols or [])
+            for col in (self._cat_cols or [])
             if col in self.feature_cols
         ]
         known_indices = [
             self.feature_cols.index(col)
-            for col in (self.known_cols or [])
+            for col in (self._known_cols or [])
             if col in self.feature_cols
         ]
         unknown_indices = [
             self.feature_cols.index(col)
-            for col in (self.unknown_cols or [])
+            for col in (self._unknown_cols or [])
             if col in self.feature_cols
         ]
         target_indices = [
             self.feature_cols.index(col)
-            for col in (self.target_cols or [])
+            for col in (self._target_cols or [])
             if col in self.feature_cols
         ]
 
-        logger.info(f"Categorical feature indices: {cat_indices}")
-        logger.info(f"Known future feature indices: {known_indices}")
-        logger.info(f"Unknown future feature indices: {unknown_indices}")
-        logger.info(f"Target feature indices: {target_indices}")
-
-        # Calculate groups per file
-        groups_per_file = []
-        for file_idx in range(len(self.file_paths)):
-            file_groups = [key for key in self._group_ids if key[0] == file_idx]
-            groups_per_file.append([key[1] for key in file_groups])  # Extract group IDs
-
-        logger.info(f"Groups per file: {groups_per_file}")
-
+        logger.info("=" * 80 + "\n")
         # Prepare comprehensive metadata dictionary
         logger.info("PREPARING METADATA...")
         self.metadata = {
             # Dataset dimensions (counts)
-            "n_targets": len(self.target_cols),
+            "n_targets": len(self._target_cols),
             "n_features": len(self.feature_cols),
-            "n_categorical": len(self.cat_cols),
+            "n_categorical": len(self._cat_cols),
             "n_known_future": len(self.known_cols) if self.known_cols else 0,
             "n_unknown_future": len(self.unknown_cols) if self.unknown_cols else 0,
             # Column names
-            "target_cols": self.target_cols,
+            "target_cols": self._target_cols,
             "feature_cols": self.feature_cols,
             # Feature indices
             "idx_categorical": cat_indices,
@@ -974,48 +971,41 @@ class MultiSourceTSDataSet(BaseD1Layer):
             # Group information
             "n_groups": len(self._group_ids),
             # Column types and temporal information
-            "time_col": self.time_col,
+            "time_col": self._time_col,
             "known_cols": self.known_cols if self.known_cols else [],
             "unknown_cols": self.unknown_cols if self.unknown_cols else [],
-            "enrich_cat": self.enrich_cat if self.enrich_cat else [],
+            "enrich_cat": self._enrich_cat if self._enrich_cat else [],
         }
 
         # Add categorical information to metadata only if categorical columns exist
-        if self.cat_cols and len(self.cat_cols) > 0:
+        if self._cat_cols and len(self._cat_cols) > 0:
             logger.info("Processing categorical columns...")
-            self.metadata["categorical_columns"] = self.cat_cols
+            self.metadata["categorical_columns"] = self._cat_cols
 
             # Enhanced categorical cardinality information
             cardinalities = {}
             categorical_mappings = {}
 
-            for col in self.cat_cols:
-                # Special handling for group columns - use known group metadata
+            # Process all categorical columns
+            for col in self._cat_cols:
+                # Handle group columns
                 if col in self.group_cols and hasattr(self, "group_info") and self.group_info:
-                    # Extract all unique group values from group_info
-                    group_values = set()
-                    for group_key, info in self.group_info.items():
-                        if "original_values" in info and info["group_columns"] == self.group_cols:
-                            # For single group column, extract the value
-                            if len(info["original_values"]) == 1:
-                                group_values.add(str(info["original_values"][0]))
+                    if col in self.label_encoders:
+                        n_categories = len(self.label_encoders[col].classes_)
+                        group_values = self.label_encoders[col].classes_.tolist()
+                    else:
+                        group_values = set()
+                        for group_key, info in self.group_info.items():
+                            if (
+                                "original_values" in info
+                                and info["group_columns"] == self.group_cols
+                            ):
+                                if len(info["original_values"]) == 1:
+                                    group_values.add(str(info["original_values"][0]))
+                        group_values = sorted(list(group_values))
+                        n_categories = len(group_values)
 
-                    # Ensure we have all group values
-                    group_values = sorted(list(group_values))
-                    n_categories = len(group_values)
                     cardinalities[col] = n_categories
-
-                    # Update or create label encoder with all group values
-                    if col not in self.label_encoders:
-                        self.label_encoders[col] = LabelEncoder()
-                        if hasattr(self.label_encoders[col], "handle_unknown"):
-                            self.label_encoders[col].handle_unknown = "use_encoded_value"
-                            self.label_encoders[col].unknown_value = -1
-
-                    # Fit encoder with all group values
-                    self.label_encoders[col].fit(group_values)
-
-                    # Store the actual category mappings for reference
                     categorical_mappings[col] = {
                         "categories": group_values,
                         "cardinality": n_categories,
@@ -1023,73 +1013,60 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         if col in self.feature_cols
                         else -1,
                     }
-
                     logger.info(
-                        f"  - {col}: {n_categories} categories"
-                        f"{group_values[:5]}{'...' if n_categories > 5 else ''}"
+                        f"  - {col}: {n_categories} categories{group_values[:5]}{'...' if n_categories > 5 else ''}"  # noqa: E501
                     )
-                elif col in self.label_encoders:
-                    categories = self.label_encoders[col].classes_
-                    n_categories = len(categories)
-                    cardinalities[col] = n_categories
 
-                    # Store the actual category mappings for reference
+                # Handle regular categorical columns (non-group)
+                elif col in self.label_encoders:
+                    n_categories = len(self.label_encoders[col].classes_)
+                    categories = self.label_encoders[col].classes_.tolist()
+                    cardinalities[col] = n_categories
                     categorical_mappings[col] = {
-                        "categories": categories.tolist(),
+                        "categories": categories,
                         "cardinality": n_categories,
                         "feature_index": self.feature_cols.index(col)
                         if col in self.feature_cols
                         else -1,
                     }
-
                     logger.info(
-                        f"  - {col}: {n_categories} categories {categories[:5].tolist()}{'...' if n_categories > 5 else ''}"  # noqa: E501
+                        f"  - {col}: {n_categories} categories{categories[:5]}{'...' if n_categories > 5 else ''}"  # noqa: E501
                     )
 
-            self.metadata["categorical_cardinalities"] = []
+            # Update metadata with the dictionaries
+            self.metadata["categorical_cardinalities"] = cardinalities
             self.metadata["categorical_mappings"] = categorical_mappings
-            # Populate simple lists for easier access
-            for col_name, mapping in categorical_mappings.items():
-                self.metadata["categorical_cardinalities"].append(mapping["cardinality"])
 
-        # Add group information to metadata
-        self.metadata["group_cols"] = self.group_cols
+            # Handle group mapping
+            if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
+                # mapping from composite key to integer id for multi-column groups
+                unique_groups = [info["group_key"][0] for info in self.group_info.values()]
+                group_to_int = {group: idx for idx, group in enumerate(set(unique_groups))}
 
-        # For empty group_cols, add special metadata indicating global grouping
-        if not self.group_cols:
-            self.metadata["single_group"] = True
-            self.metadata["n_groups"] = 1
-            logger.info("No group columns specified - treating as a single global group")
-        # Adding group mapping information for composite keys
-        elif isinstance(self.group_cols, list) and len(self.group_cols) > 1:
-            # mapping from composite key to integer id
-            unique_groups = [info["group_key"][0] for info in self.group_info.values()]
-            group_to_int = {group: idx for idx, group in enumerate(set(unique_groups))}
+                # we create reverse mapping from integer ID to original values
+                reverse_mapping = {}
+                for file_group_key, info in self.group_info.items():
+                    group_key = info["group_key"][0]
+                    if "original_values" in info:
+                        reverse_mapping[group_to_int[group_key]] = {
+                            "composite_key": group_key,
+                            "original_values": dict(zip(self.group_cols, info["original_values"])),
+                        }
 
-            # we create reverse mapping from integer ID to original values
-            reverse_mapping = {}
-            for file_group_key, info in self.group_info.items():
-                group_key = info["group_key"][0]
-                if "original_values" in info:
-                    reverse_mapping[group_to_int[group_key]] = {
-                        "composite_key": group_key,
-                        "original_values": dict(zip(self.group_cols, info["original_values"])),
-                    }
+                # add mappings to metadata
+                self.metadata["group_mapping"] = group_to_int
+                self.metadata["reverse_mapping"] = reverse_mapping
+                self.metadata["n_groups"] = len(group_to_int)
 
-            # add mappings to metadata
-            self.metadata["group_mapping"] = group_to_int
-            self.metadata["reverse_mapping"] = reverse_mapping
-            self.metadata["n_groups"] = len(group_to_int)
-
-        # Add group mapping for single-column group keys
-        elif self.group_cols:
-            # group_cols is a string or single-item list
-            unique_groups = [info["group_key"] for info in self.group_info.values()]
-            group_to_int = {group: idx for idx, group in enumerate(sorted(set(unique_groups)))}
-            reverse_mapping = {idx: group for group, idx in group_to_int.items()}
-            self.metadata["group_mapping"] = group_to_int
-            self.metadata["reverse_mapping"] = reverse_mapping
-            self.metadata["n_groups"] = len(group_to_int)
+            # Add group mapping for single-column group keys
+            elif self.group_cols:
+                # group_cols is a string or single-item list
+                unique_groups = [info["group_key"] for info in self.group_info.values()]
+                group_to_int = {group: idx for idx, group in enumerate(sorted(set(unique_groups)))}
+                reverse_mapping = {idx: group for group, idx in group_to_int.items()}
+                self.metadata["group_mapping"] = group_to_int
+                self.metadata["reverse_mapping"] = reverse_mapping
+                self.metadata["n_groups"] = len(group_to_int)
 
         # Add dataset structure information
         self.metadata["total_samples"] = self.dataset_length
@@ -1110,6 +1087,50 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info("=" * 80)
         logger.info("D1 LAYER INITIALIZATION COMPLETE\n")
 
+    def _update_metadata_after_preload(self):
+        """Update metadata after preloading data to include enriched features."""
+        # called after preloading data, when label encoders for enriched features are available
+        if not hasattr(self, "metadata") or not self.metadata:
+            return
+
+        # Update categorical cardinalities and mappings for enriched features
+        if hasattr(self, "_enrich_cat") and self._enrich_cat:
+            # Initialize dictionaries if they don't exist
+            if "categorical_cardinalities" not in self.metadata:
+                self.metadata["categorical_cardinalities"] = {}
+            if "categorical_mappings" not in self.metadata:
+                self.metadata["categorical_mappings"] = {}
+
+            cardinalities = self.metadata["categorical_cardinalities"]
+            categorical_mappings = self.metadata["categorical_mappings"]
+
+            for feature in self._enrich_cat:
+                if feature in self.label_encoders:
+                    categories = self.label_encoders[feature].classes_
+                    n_categories = len(categories)
+                    cardinalities[feature] = n_categories
+                    logger.info(
+                        f"Updated metadata with enriched feature "
+                        f"'{feature}': {n_categories} categories"
+                    )
+
+                    # Also update categorical_mappings
+                    categorical_mappings[feature] = {
+                        "categories": categories.tolist(),
+                        "cardinality": n_categories,
+                        "feature_index": self.feature_cols.index(feature)
+                        if feature in self.feature_cols
+                        else -1,
+                    }
+
+            # Update metadata
+            self.metadata["categorical_cardinalities"] = cardinalities
+            self.metadata["categorical_mappings"] = categorical_mappings
+
+            # Log updated metadata
+            logger.info(f"Updated categorical_cardinalities: {cardinalities}")
+            logger.info(f"Updated categorical_mappings keys: {list(categorical_mappings.keys())}")
+
     def _preload_data(self):
         """
         Preload all data into memory for faster access.
@@ -1128,6 +1149,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.cached_data[file_group_key] = group_data
 
         logger.info(f"Preloaded {len(self.cached_data)} groups into memory")
+
+        # Update metadata with enriched features after preloading
+        self._update_metadata_after_preload()
 
     def _load_group_data_from_dataframe(self, file_group_key):
         """
@@ -1346,8 +1370,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 group_data = self._load_group_data(file_group_key)
 
         # Sort by time if time column exists
-        if self.time_col in group_data.columns:
-            group_data = group_data.sort_values(by=self.time_col)
+        if self._time_col in group_data.columns:
+            group_data = group_data.sort_values(by=self._time_col)
 
         # Get group ID - always use integer encoding if mapping exists
         group_key = file_group_key[1]
@@ -1363,7 +1387,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if len(group_data) == 0:
             logger.warning(f"Empty group data found for group {group_id}.")
             x = torch.empty(0, len(self.feature_cols), dtype=torch.float32)
-            y = torch.empty(0, len(self.target_cols), dtype=torch.float32)
+            y = torch.empty(0, len(self._target_cols), dtype=torch.float32)
             time_indices = []
         else:
             # Separate numerical and categorical features
@@ -1402,7 +1426,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
             # Extract time indices
             time_indices = (
-                group_data[self.time_col].tolist() if self.time_col in group_data.columns else []
+                group_data[self._time_col].tolist() if self._time_col in group_data.columns else []
             )
 
         # Prepare the group sample
