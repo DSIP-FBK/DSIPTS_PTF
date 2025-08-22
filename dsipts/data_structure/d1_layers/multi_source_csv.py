@@ -132,11 +132,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Set known and unknown columns with proper handling for None values
         self._known_cols = known_cols or []
         self._unknown_cols = unknown_cols or list(self._target_cols) if self._target_cols else []
-        # Initialize known_future columns (columns that are known in the future)
-        # This will include user-provided known columns plus
-        #   any additional columns from groups and temporal enrichment
-        self._known_future = self._known_cols.copy() if self._known_cols else []
-        # Store original user-provided known columns to preserve them
+        # Store original user-provided known columns
         self._original_known_cols = self._known_cols.copy() if self._known_cols else []
 
         # Handle global forecasting logic: if global_forecasting=False and multiple groups exist,
@@ -308,12 +304,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     f"Added group column '{group_col}' to categorical columns for label encoding"
                 )
 
-        # Add group columns to known_future columns (group identity is known in the future)
+        # Add group columns to known columns (group identity is known at prediction time)
         for group_col in self._group_cols:
-            # Only add to known_future, not to known_cols to preserve user-provided known columns
-            if hasattr(self, "_known_future") and group_col not in self._known_future:
-                self._known_future.append(group_col)
-                logger.info(f"Added group column '{group_col}' to known future columns")
+            if group_col not in self._known_cols:
+                self._known_cols.append(group_col)
+                logger.info(f"Added group column '{group_col}' to known columns")
 
     def _validate_enrich_cat(self):
         """Validate the enrich_cat parameter."""
@@ -330,21 +325,14 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 self._cat_cols.append(option)
                 logger.info(f"Categorical columns updated after enrichment: {self._cat_cols}")
 
-            # Add to known_future only (not to known_cols) to preserve user-provided known columns
-            if option not in self._known_future:
-                self._known_future.append(option)
-                logger.info(f"Known future columns updated after enrichment: {self._known_future}")
+            # Add to known_cols since temporal features are always known at prediction time
+            if option not in self._known_cols:
+                self._known_cols.append(option)
+                logger.info(f"Known columns updated after enrichment: {self._known_cols}")
 
             # Log if already present in all required lists
-            if (
-                option in self._cat_cols
-                and option in self._known_cols
-                and option in self._known_future
-            ):
-                logger.info(
-                    f"Enrichment option {option} already in categorical,"
-                    f" known, and known_future columns"
-                )
+            if option in self._cat_cols and option in self._known_cols:
+                logger.info(f"Enrichment option {option} already in categorical and known columns")
 
     def _parse_and_enrich_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """
@@ -466,21 +454,19 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     self._cat_cols.append(feature)
                     logger.info(f"Updated cat columns with enriched values: {self._enrich_cat}")
 
-            # Add to known_future only (not to known_cols) to preserve user-provided known columns
-            if self._known_future is not None:
+            # Add to known_cols since temporal features are always known at prediction time
+            if self._known_cols is not None:
                 for feature in enriched_features:
-                    if feature not in self._known_future:
-                        self._known_future.append(feature)
-                        logger.info(
-                            f"Updated known_future with enriched values: {self._known_future}"
-                        )
+                    if feature not in self._known_cols:
+                        self._known_cols.append(feature)
+                        logger.info(f"Updated known_cols with enriched values: {self._known_cols}")
 
             self._is_file_read = True
             logger.info(
                 f"Added temporal categorical features to categorical columns: {enriched_features}"
             )
             logger.info(
-                f"Added temporal categorical features to known_future columns: {enriched_features}"
+                f"Added temporal categorical features to known columns: {enriched_features}"
             )
             logger.info(
                 "Label encoding will be applied to these enriched features during processing"
@@ -515,12 +501,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     @property
     def known_cols(self) -> Optional[List[str]]:
-        """Get the known future columns."""
+        """Get the known columns."""
         return self._known_cols or []
 
     @property
     def unknown_cols(self) -> Optional[List[str]]:
-        """Get the unknown future columns."""
+        """Get the unknown columns."""
         return self._unknown_cols or []
 
     def _process_dataframes(self):
@@ -888,23 +874,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     continue
             return len(unique_values)
 
-    def _restore_original_known_cols(self):
-        """
-        Restore the original user-provided known columns.
-        """
-        if hasattr(self, "_original_known_cols"):
-            logger.info(f"Restoring original known columns: {self._original_known_cols}")
-            for col in self._original_known_cols:
-                if col not in self._known_cols:
-                    self._known_cols.append(col)
-                    logger.info(f"Added {col} to known columns: {self._known_cols}")
-
     def _prepare_metadata(self):
         """
         Prepare dataset metadata including dimensions, column info, and statistics.
         """
-        # Restore original known columns before preparing metadata
-        self._restore_original_known_cols()
         logger = logging.getLogger(__name__)
 
         # Log dataset configuration
@@ -915,8 +888,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         logger.info(f"Target Columns: {self._target_cols}")
         logger.info(f"Feature Columns: {self.feature_cols}")
         logger.info(f"Categorical Columns: {self._cat_cols}")
-        logger.info(f"Known Future Columns: {self.known_cols}")
-        logger.info(f"Unknown Future Columns: {self.unknown_cols}")
+        logger.info(f"Known Columns: {self.known_cols}")
+        logger.info(f"Unknown Columns: {self.unknown_cols}")
         logger.info(f"Group Columns: {self.group_cols}")
         logger.info(f"Memory Efficient Mode: {self.memory_efficient}")
         logger.info("-" * 80 + "\n")
@@ -991,15 +964,15 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "n_targets": len(self._target_cols),
             "n_features": len(self.feature_cols),
             "n_categorical": len(self._cat_cols),
-            "n_known_future": len(self.known_cols) if self.known_cols else 0,
-            "n_unknown_future": len(self.unknown_cols) if self.unknown_cols else 0,
+            "n_known": len(self.known_cols) if self.known_cols else 0,
+            "n_unknown": len(self.unknown_cols) if self.unknown_cols else 0,
             # Column names
             "target_cols": self._target_cols,
             "feature_cols": self.feature_cols,
             # Feature indices
             "idx_categorical": cat_indices,
-            "idx_known_future": known_indices,
-            "idx_unknown_future": unknown_indices,
+            "idx_known": known_indices,
+            "idx_unknown": unknown_indices,
             "idx_targets": target_indices,
             # Group information
             "n_groups": len(self._group_ids),
@@ -1160,27 +1133,17 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.metadata["categorical_cardinalities"] = cardinalities
             self.metadata["categorical_mappings"] = categorical_mappings
 
-            # Recalculate idx_known_future to include temporal features
+            # Calculate indices for known columns
             known_indices = [
-                self.feature_cols.index(col)
-                for col in (self._known_future or [])
-                if col in self.feature_cols
+                self.feature_cols.index(col) for col in self._known_cols if col in self.feature_cols
             ]
-            self.metadata["idx_known_future"] = known_indices
-            self.metadata["n_known_future"] = len(self._known_future) if self._known_future else 0
+            self.metadata["idx_known"] = known_indices
+            self.metadata["n_known"] = len(self._known_cols) if self._known_cols else 0
 
-            # Update known_future in metadata while preserving original known_cols
-            # known_future should include all columns known at prediction time
-            self.metadata["known_future"] = self._known_future.copy() if self._known_future else []
-            # Restore original known_cols in metadata
-            self.metadata["known_cols"] = (
-                self._original_known_cols.copy()
-                if hasattr(self, "_original_known_cols")
-                else self._known_cols.copy()
-            )
+            # Update known_cols in metadata
+            self.metadata["known_cols"] = self._known_cols.copy() if self._known_cols else []
 
-            logger.info(f"Updated idx_known_future after enrichment: {known_indices}")
-            logger.info(f"Updated known_future columns: {self._known_future}")
+            logger.info(f"Updated idx_known after enrichment: {known_indices}")
             logger.info(f"Updated known_cols in metadata: {self.metadata['known_cols']}")
 
             # Log updated metadata
