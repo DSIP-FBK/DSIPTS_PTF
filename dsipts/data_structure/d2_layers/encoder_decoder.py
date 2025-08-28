@@ -46,6 +46,15 @@ class EncoderDecoderDataset(Dataset):
             cat_feature_cols: Categorical feature column names
             include_target_in_decoder: If True, includes target in decoder (for select models)
         """
+        logger.info("Initializing EncoderDecoderDataset with:")
+        logger.info(f"  past_len: {past_len}, future_len: {future_len}")
+        logger.info(f"  target_cols: {target_cols}")
+        logger.info(f"  cat_cols: {cat_cols}")
+        logger.info(f"  cont_feature_cols: {cont_feature_cols}")
+        logger.info(f"  cat_feature_cols: {cat_feature_cols}")
+        logger.info(f"  include_target_in_decoder: {include_target_in_decoder}")
+        logger.info(f"  valid_windows: {len(valid_windows)} windows")
+
         self.d1_dataset = d1_dataset
         self.valid_windows = valid_windows
         self.past_len = past_len
@@ -54,16 +63,22 @@ class EncoderDecoderDataset(Dataset):
         self.cat_cols = cat_cols or []
         self.cont_feature_cols = cont_feature_cols or []
         self.include_target_in_decoder = include_target_in_decoder
+
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
             try:
                 # Access the cat_cols property from D1 dataset
                 cat_cols_from_d1 = d1_dataset.cat_cols
                 self.cat_feature_cols = cat_cols_from_d1 or []
+                logger.info(
+                    f"Auto-detected categorical feature columns from D1: {self.cat_feature_cols}"
+                )
             except (AttributeError, TypeError):
                 self.cat_feature_cols = []
+                logger.warning("Could not auto-detect categorical feature columns from D1")
         else:
             self.cat_feature_cols = cat_feature_cols
+            logger.info(f"Using provided categorical feature columns: {self.cat_feature_cols}")
 
     def __len__(self):
         """Return the number of valid windows."""
@@ -84,16 +99,30 @@ class EncoderDecoderDataset(Dataset):
         group_idx = window["group_idx"]
         start_idx = window["start_idx"]
 
+        logger.debug(f"Getting item {idx} - window: group_idx={group_idx}, start_idx={start_idx}")
+
         # Get the full group data from D1 dataset
         group_sample = self.d1_dataset[group_idx]
+
+        # Log group sample structure
+        if idx == 0:  # Only log for the first item to avoid excessive logging
+            logger.info(f"Group sample keys: {list(group_sample.keys())}")
+            for key, value in group_sample.items():
+                if isinstance(value, torch.Tensor):
+                    logger.info(f"  {key}: tensor of shape {tuple(value.shape)}")
+                else:
+                    logger.info(f"  {key}: {type(value)}")
 
         # Extract the window from the group's sequence
         past_end = start_idx + self.past_len
         future_end = past_end + self.future_len
+        logger.debug(
+            f"Window indices: start={start_idx}, past_end={past_end}, future_end={future_end}"
+        )
 
         # Extract past features and future targets from the group's tensors
-        # past_features = group_sample["x"][start_idx:past_end]  # [past_len, n_features] #noqa TODOremove this?
         future_targets = group_sample["y"][past_end:future_end]  # [future_len, n_targets]
+        logger.debug(f"Extracted future_targets with shape: {tuple(future_targets.shape)}")
 
         # Build clean input dictionary - only include keys when data is present
         x = {}
@@ -106,9 +135,11 @@ class EncoderDecoderDataset(Dataset):
         idx_unknown_future: List[int] = list(meta.get("idx_unknown_future", []))  # noqa
         idx_targets_full: List[int] = list(meta.get("idx_targets", []))
 
+        # Get feature columns for mapping indices to column names
+        feature_cols = meta.get("feature_cols", [])
+
         # Get temporal features from metadata if available
         enrich_cat = meta.get("enrich_cat", [])
-        feature_cols = meta.get("feature_cols", [])
 
         # Ensure all temporal features are treated as categorical
         # This is a safety check in case idx_categorical doesn't include them
@@ -118,9 +149,9 @@ class EncoderDecoderDataset(Dataset):
                     feature_idx = feature_cols.index(temporal_feature)
                     if feature_idx not in idx_categorical:
                         idx_categorical.append(feature_idx)
-                        logger.info(
-                            f"Added temporal feature '{temporal_feature}' (idx: {feature_idx}) to categorical indices"  # noqa
-                        )
+                        # logger.info(
+                        #    f"Added temporal feature '{temporal_feature}' (idx: {feature_idx}) to categorical indices"  # noqa
+                        # )
 
         # Determine numeric feature indices as complement of categorical
         n_features = int(meta.get("n_features", group_sample["x"].shape[1]))
@@ -171,14 +202,35 @@ class EncoderDecoderDataset(Dataset):
         # Backward compatibility keys (kept for existing code)
         x["future_targets"] = future_targets.float()
 
+        # Expose temporal enrichment columns as separate keys
+        if len(idx_categorical) > 0 and len(feature_cols) > 0:
+            # Create a mapping from feature index to column name
+            feature_idx_to_name = {idx: name for idx, name in enumerate(feature_cols)}
+
+            # Extract temporal enrichment columns from x_cat_past
+            for cat_idx, orig_idx in enumerate(idx_categorical):
+                if orig_idx < len(feature_cols):
+                    col_name = feature_idx_to_name[orig_idx]
+                    if col_name in enrich_cat:
+                        # Add the temporal feature as a separate key
+                        x[f"{col_name}"] = X_past[:, orig_idx].long()
+                        logger.debug(f"Added temporal feature '{col_name}' as separate key")
+
         # Debug information (for tracing back to original CSV data)
-        # Keep group_id as integer for consistency and debugging
+        # Keep group_id for consistency and debugging
         group_id = window.get("group_id", 0)
+
+        # Handle different group_id types
         if isinstance(group_id, str):
             # Convert string group_id to integer using group mapping if available
             meta_group_mapping = meta.get("group_mapping", {})
             group_id = meta_group_mapping.get(group_id, 0)
-        x["group_id"] = int(group_id)  # Keep for debugging
+            x["group_id"] = int(group_id)
+        elif isinstance(group_id, (int, float)):
+            x["group_id"] = int(group_id)
+        else:
+            # For tuple or other types, keep as is
+            x["group_id"] = group_id
 
         # Use actual start index from window for debugging (trace back to original CSV)
         x["time_idx"] = start_idx  # Actual start index in original data for debugging
@@ -266,6 +318,17 @@ class EncoderDecoder(pl.LightningDataModule):
         """
         super().__init__()
 
+        logger.info("========== INITIALIZING ENCODER-DECODER (D2) LAYER ==========")
+        logger.info("Configuration parameters:")
+        logger.info(f"  past_len: {past_len}, future_len: {future_len}")
+        logger.info(f"  batch_size: {batch_size}, step_size: {step_size}")
+        logger.info(f"  min_valid_length: {min_valid_length or past_len}")
+        logger.info(f"  split_method: {split_method}, split_config: {split_config}")
+        logger.info(f"  num_workers: {num_workers}, max_samples_per_group: {max_samples_per_group}")
+        logger.info(
+            f"  precompute: {precompute}, include_target_in_decoder: {include_target_in_decoder}"
+        )
+
         self.d1_dataset = d1_dataset
         self.past_len = past_len
         self.future_len = future_len
@@ -287,9 +350,17 @@ class EncoderDecoder(pl.LightningDataModule):
         self.target_cols = d1_dataset.target_cols
         self.feature_cols = d1_dataset.feature_cols
 
+        logger.info("Column information from D1 dataset:")
+        logger.info(f"  known_cols: {self.known_cols}")
+        logger.info(f"  unknown_cols: {self.unknown_cols}")
+        logger.info(f"  group_cols: {self.group_cols}")
+        logger.info(f"  target_cols: {self.target_cols}")
+        logger.info(f"  feature_cols: {len(self.feature_cols)} columns")
+
         # Handle potentially None or empty categorical columns
         try:
             self.cat_cols = d1_dataset.cat_cols if d1_dataset.cat_cols else []
+            logger.info(f"  cat_cols from D1: {self.cat_cols}")
         except (AttributeError, TypeError):
             logger.warning("No categorical columns found in D1 dataset or cat_cols is None")
             self.cat_cols = []
@@ -304,7 +375,12 @@ class EncoderDecoder(pl.LightningDataModule):
         ]
         self.cont_feature_cols = [col for col in all_feature_cols if col not in self.cat_cols]
 
+        logger.info("Derived column classifications:")
+        logger.info(f"  cat_feature_cols: {self.cat_feature_cols}")
+        logger.info(f"  cont_feature_cols: {len(self.cont_feature_cols)} columns")
+
         # Build valid windows
+        logger.info("Building valid windows from D1 dataset...")
         self._build_valid_windows()
 
         logger.info(f"EncoderDecoder initialized with {len(self.valid_windows)} valid windows")
@@ -353,23 +429,33 @@ class EncoderDecoder(pl.LightningDataModule):
         The D1 dataset returns all data for a group as a single sample.
         We need to extract individual timesteps from each group to create windows.
         """
+        logger.info("Building valid sliding windows from D1 dataset...")
         self.valid_windows = []
+        total_groups = len(self.d1_dataset)
+        logger.info(f"Processing {total_groups} groups from D1 dataset")
+
+        windows_per_group = {}
+        insufficient_groups = []
 
         # Process each group in the D1 dataset
-        for group_idx in range(len(self.d1_dataset)):
+        for group_idx in range(total_groups):
             group_sample = self.d1_dataset[group_idx]
             group_id = group_sample.get("group_id", group_idx)
             seq_len = group_sample.get("seq_len", 0)
 
-            logger.debug(f"Processing group {group_id} with sequence length {seq_len}")
+            logger.info(
+                f"Processing group {group_id} (idx: {group_idx}) with sequence length {seq_len}"
+            )
 
             # Create sliding windows within this group's sequence
             max_windows = seq_len - self.past_len - self.future_len + 1
-            logger.debug(
-                f"Group {group_id}: seq_len={seq_len}, past_len={self.past_len}, future_len={self.future_len}, max_windows={max_windows}"  # noqa
+            logger.info(
+                f"Group {group_id}: seq_len={seq_len}, past_len={self.past_len},"
+                f"future_len={self.future_len}, max_windows={max_windows}"
             )
 
             if max_windows > 0:
+                group_windows = 0
                 for i in range(0, max_windows, self.step_size):
                     # Create window metadata
                     window = {
@@ -381,9 +467,14 @@ class EncoderDecoder(pl.LightningDataModule):
                     }
 
                     self.valid_windows.append(window)
-                    logger.debug(
-                        f"Added valid window {len(self.valid_windows)} for group {group_id} at position {i}"  # noqa
-                    )
+                    group_windows += 1
+
+                    # Log every 100 windows to avoid excessive output
+                    if len(self.valid_windows) % 100 == 0:
+                        logger.debug(
+                            f"Added {len(self.valid_windows)} windows so far"
+                            f"(current: group {group_id}, position {i})"
+                        )
 
                     # Limit samples per group if specified
                     if (
@@ -391,11 +482,57 @@ class EncoderDecoder(pl.LightningDataModule):
                         and len([w for w in self.valid_windows if w["group_id"] == group_id])
                         >= self.max_samples_per_group
                     ):
+                        logger.info(
+                            f"Reached max_samples_per_group ({self.max_samples_per_group})"
+                            f"for group {group_id}"
+                        )
                         break
+
+                windows_per_group[group_id] = group_windows
+                logger.info(f"Created {group_windows} windows for group {group_id}")
             else:
+                insufficient_groups.append(group_id)
                 logger.warning(
-                    f"Group {group_id} has insufficient data for windows (seq_len={seq_len}, required={self.past_len + self.future_len})"  # noqa
+                    f"Group {group_id} has insufficient data for windows (seq_len={seq_len},"
+                    f" required={self.past_len + self.future_len})"
                 )
+
+        # Summary statistics
+        logger.info(
+            f"Window creation complete: {len(self.valid_windows)}"
+            f"total windows from {total_groups} groups"
+        )
+        logger.info(
+            f"Groups with windows: {len(windows_per_group)}, "
+            f"Insufficient groups: {len(insufficient_groups)}"
+        )
+        if insufficient_groups:
+            logger.info(f"Insufficient groups: {insufficient_groups}")
+
+        # Log distribution of windows per group
+        if windows_per_group:
+            min_windows = min(windows_per_group.values())
+            max_windows = max(windows_per_group.values())
+            avg_windows = sum(windows_per_group.values()) / len(windows_per_group)
+            logger.info(
+                f"Windows per group - Min: {min_windows},"
+                f"Max: {max_windows}, Avg: {avg_windows:.1f}"
+            )
+
+            # Log groups with most and least windows
+            if len(windows_per_group) > 1:
+                most_windows_group = max(windows_per_group.items(), key=lambda x: x[1])[0]
+                least_windows_group = min(windows_per_group.items(), key=lambda x: x[1])[0]
+                logger.info(
+                    f"Group with most windows: {most_windows_group} "
+                    f"({windows_per_group[most_windows_group]} windows)"
+                )
+                logger.info(
+                    f"Group with least windows: {least_windows_group} "
+                    f"({windows_per_group[least_windows_group]} windows)"
+                )
+        else:
+            logger.warning("No valid windows could be created from any group")
 
     def _is_valid_window(self, past_indices: List[int], future_indices: List[int]) -> bool:
         """
@@ -482,36 +619,112 @@ class EncoderDecoder(pl.LightningDataModule):
         Returns:
             Tuple of (train_dataset, val_dataset, test_dataset)
         """
+        logger.info("========== SPLITTING DATASET ==========")
+        logger.info(f"Split method: {method}")
+        logger.info(
+            f"Split ratios: train={train_ratio:.1%}, val={val_ratio:.1%}, test={test_ratio:.1%}"
+        )
+
         total_samples = len(self.dataset)
+        logger.info(f"Total samples available: {total_samples}")
+
+        # Verify ratios sum to 1
+        ratio_sum = train_ratio + val_ratio + test_ratio
+        if abs(ratio_sum - 1.0) > 1e-6:
+            logger.warning(
+                f"Split ratios sum to {ratio_sum:.3f}, not 1.0. This may cause unexpected behavior."
+            )
 
         if method == "temporal":
+            logger.info(
+                "Using temporal split (earlier data for training, later for validation/test)"
+            )
             # Temporal split - earlier data for training, later for validation/test
             train_end = int(total_samples * train_ratio)
             val_end = int(total_samples * (train_ratio + val_ratio))
 
+            logger.info(f"Split points: train_end={train_end}, val_end={val_end}")
+
             train_indices = list(range(0, train_end))
             val_indices = list(range(train_end, val_end))
             test_indices = list(range(val_end, total_samples))
+
+            # Log window information for each split
+            if train_indices:
+                first_train = self.valid_windows[train_indices[0]]
+                last_train = self.valid_windows[train_indices[-1]]
+                logger.info(
+                    f"Train data spans from window {first_train['start_idx']}"
+                    f"to {last_train['start_idx']}"
+                )
+
+            if val_indices:
+                first_val = self.valid_windows[val_indices[0]]
+                last_val = self.valid_windows[val_indices[-1]]
+                logger.info(
+                    f"Validation data spans from window {first_val['start_idx']}"
+                    f"to {last_val['start_idx']}"
+                )
+
+            if test_indices:
+                first_test = self.valid_windows[test_indices[0]]
+                last_test = self.valid_windows[test_indices[-1]]
+                logger.info(
+                    f"Test data spans from window {first_test['start_idx']}"
+                    f" to {last_test['start_idx']}"
+                )
+
         else:
+            logger.info("Using random split (shuffled indices)")
             # Random split
+            np.random.seed(42)  # For reproducibility
             indices = np.random.permutation(total_samples)
             train_end = int(total_samples * train_ratio)
             val_end = int(total_samples * (train_ratio + val_ratio))
+
+            logger.info(f"Split points after shuffling: train_end={train_end}, val_end={val_end}")
 
             train_indices = indices[:train_end].tolist()
             val_indices = indices[train_end:val_end].tolist()
             test_indices = indices[val_end:].tolist()
 
+            logger.info(
+                f"Shuffled indices for random split (showing first 5): {train_indices[:5]}..."
+            )
+
+        # Log group distribution in each split
+        train_groups = set(self.valid_windows[i]["group_id"] for i in train_indices)
+        val_groups = set(self.valid_windows[i]["group_id"] for i in val_indices)
+        test_groups = set(self.valid_windows[i]["group_id"] for i in test_indices)
+
+        # Check for group overlap
+        train_val_overlap = train_groups.intersection(val_groups)
+        train_test_overlap = train_groups.intersection(test_groups)
+        val_test_overlap = val_groups.intersection(test_groups)
+
+        logger.info("Group distribution in splits:")
+        logger.info(f"  Train: {len(train_groups)} unique groups")
+        logger.info(f"  Val: {len(val_groups)} unique groups")
+        logger.info(f"  Test: {len(test_groups)} unique groups")
+        logger.info("Group overlap between splits:")
+        logger.info(f"  Train-Val overlap: {len(train_val_overlap)} groups")
+        logger.info(f"  Train-Test overlap: {len(train_test_overlap)} groups")
+        logger.info(f"  Val-Test overlap: {len(val_test_overlap)} groups")
+
         logger.info(
-            f"Split statistics: Train: {len(train_indices)}, "
-            f"Validation: {len(val_indices)}, Test: {len(test_indices)}"
+            f"Split statistics: Train: {len(train_indices)} samples ({train_ratio:.1%}), "
+            f"Validation: {len(val_indices)} samples ({val_ratio:.1%}), "
+            f"Test: {len(test_indices)} samples ({test_ratio:.1%})"
         )
 
-        return (
-            EncoderDecoderSubset(self.dataset, train_indices),
-            EncoderDecoderSubset(self.dataset, val_indices),
-            EncoderDecoderSubset(self.dataset, test_indices),
-        )
+        train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
+        val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
+        test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
+
+        logger.info("Dataset split complete")
+        logger.info("============================================")
+
+        return (train_dataset, val_dataset, test_dataset)
 
     def setup(self, stage=None):
         """Set up datasets for training, validation, and testing."""
@@ -531,29 +744,51 @@ class EncoderDecoder(pl.LightningDataModule):
         """Return the training dataloader."""
         from .utils import custom_collate_fn
 
+        logger.info("Creating training dataloader")
+
         if self.train_dataset is None:
             # If no explicit split was provided, use all data for training
+            logger.info("No explicit train split found, using all data for training")
             self.train_dataset = EncoderDecoderSubset(
                 self.dataset, list(range(len(self.valid_windows)))
             )
 
-        return DataLoader(
+        logger.info(f"Training dataset size: {len(self.train_dataset)} samples")
+        logger.info(f"Batch size: {self.batch_size}, Num workers: {self.num_workers}")
+        logger.info(f"Using custom collate function: {custom_collate_fn.__name__}")
+        logger.info(f"Shuffle: True, Custom sampler: {self.sampler is not None}")
+
+        if self.sampler is not None:
+            logger.info(f"Using custom sampler: {type(self.sampler).__name__}")
+
+        dataloader = DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=True if self.sampler is None else False,  # Don't shuffle when using a sampler
             num_workers=self.num_workers,
             collate_fn=custom_collate_fn,
             sampler=self.sampler,
         )
 
+        logger.info(f"Created training dataloader with {len(dataloader)} batches")
+        return dataloader
+
     def val_dataloader(self):
         """Return the validation dataloader."""
         from .utils import custom_collate_fn
 
+        logger.info("Creating validation dataloader")
+
         if self.val_dataset is None or len(self.val_dataset) == 0:
+            logger.info("No validation dataset available, skipping validation dataloader creation")
             return None
 
-        return DataLoader(
+        logger.info(f"Validation dataset size: {len(self.val_dataset)} samples")
+        logger.info(f"Batch size: {self.batch_size}, Num workers: {self.num_workers}")
+        logger.info(f"Using custom collate function: {custom_collate_fn.__name__}")
+        logger.info("Shuffle: False")
+
+        dataloader = DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
@@ -561,17 +796,31 @@ class EncoderDecoder(pl.LightningDataModule):
             collate_fn=custom_collate_fn,
         )
 
+        logger.info(f"Created validation dataloader with {len(dataloader)} batches")
+        return dataloader
+
     def test_dataloader(self):
         """Return the test dataloader."""
         from .utils import custom_collate_fn
 
+        logger.info("Creating test dataloader")
+
         if self.test_dataset is None or len(self.test_dataset) == 0:
+            logger.info("No test dataset available, skipping test dataloader creation")
             return None
 
-        return DataLoader(
+        logger.info(f"Test dataset size: {len(self.test_dataset)} samples")
+        logger.info(f"Batch size: {self.batch_size}, Num workers: {self.num_workers}")
+        logger.info(f"Using custom collate function: {custom_collate_fn.__name__}")
+        logger.info("Shuffle: False")
+
+        dataloader = DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=custom_collate_fn,
         )
+
+        logger.info(f"Created test dataloader with {len(dataloader)} batches")
+        return dataloader
