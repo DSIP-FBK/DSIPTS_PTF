@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pytorch_lightning as pl
 import torch
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
@@ -304,6 +305,8 @@ class EncoderDecoder(pl.LightningDataModule):
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
         include_target_in_decoder: bool = False,
+        scaler: Optional[Any] = None,
+        scale_targets: bool = False,
     ):
         """
         Initialize the EncoderDecoder.
@@ -323,6 +326,8 @@ class EncoderDecoder(pl.LightningDataModule):
             max_samples_per_group: Maximum samples per group
             precompute: Whether to precompute valid windows
             include_target_in_decoder: If True, include target in decoder part (for some models)
+            scaler: Optional scaler for numeric features (default: StandardScaler)
+            scale_targets: If True, also scale target variables (default: False)
         """
         super().__init__()
 
@@ -335,6 +340,9 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info(f"  num_workers: {num_workers}, max_samples_per_group: {max_samples_per_group}")
         logger.info(
             f"  precompute: {precompute}, include_target_in_decoder: {include_target_in_decoder}"
+        )
+        logger.info(
+            f"  scaler:{type(scaler).__name__ if scaler else 'None'},scale_targets: {scale_targets}"
         )
 
         self.d1_dataset = d1_dataset
@@ -350,6 +358,11 @@ class EncoderDecoder(pl.LightningDataModule):
         self.target_normalizer = target_normalizer
         self.max_samples_per_group = max_samples_per_group
         self.precompute = precompute
+        self.scale_targets = scale_targets
+
+        # Initialize scaler
+        self.scaler = scaler if scaler is not None else StandardScaler()
+        self.is_scaler_fitted = False
 
         # Extract column information from D1 dataset
         self.known_cols = d1_dataset.known_cols
@@ -608,6 +621,134 @@ class EncoderDecoder(pl.LightningDataModule):
         else:
             raise ValueError(f"Unknown split method: {self.split_method}")
 
+    def fit_scaler(self, dataset: EncoderDecoderSubset):
+        """
+        Fit the scaler on numeric features from the given dataset.
+
+        Args:
+            dataset: Dataset to fit the scaler on (typically training dataset)
+        """
+        if not hasattr(self, "scaler") or self.scaler is None:
+            logger.info("No scaler provided, skipping scaler fitting")
+            return
+
+        logger.info(f"Fitting {type(self.scaler).__name__} on training data")
+
+        # Collect all numeric features from the dataset
+        all_numeric_features = []
+
+        for idx in range(len(dataset)):
+            x, _ = dataset[idx]
+            if "x_num_past" in x and x["x_num_past"].shape[1] > 0:
+                # Extract numeric features and reshape to 2D array
+                numeric_features = x["x_num_past"].numpy().reshape(-1, x["x_num_past"].shape[1])
+                all_numeric_features.append(numeric_features)
+
+        if not all_numeric_features:
+            logger.warning("No numeric features found in dataset, cannot fit scaler")
+            return
+
+        # Concatenate all features and fit the scaler
+        all_features = np.vstack(all_numeric_features)
+        logger.info(
+            f"Fitting scaler on {all_features.shape[0]} samples"
+            f" with {all_features.shape[1]} features"
+        )
+
+        self.scaler.fit(all_features)
+        self.is_scaler_fitted = True
+        logger.info("Scaler fitted successfully")
+
+        # If scale_targets is True, fit another scaler for target variables
+        if self.scale_targets:
+            logger.info("Fitting target scaler")
+            self.target_scaler = StandardScaler()
+
+            all_targets = []
+            for idx in range(len(dataset)):
+                x, y = dataset[idx]
+                if isinstance(y, torch.Tensor) and y.numel() > 0:
+                    targets = y.numpy().reshape(-1, y.shape[-1])
+                    all_targets.append(targets)
+
+            if all_targets:
+                all_targets = np.vstack(all_targets)
+                logger.info(
+                    f"Fitting target scaler on {all_targets.shape[0]}"
+                    f" samples with {all_targets.shape[1]} features"
+                )
+                self.target_scaler.fit(all_targets)
+                logger.info("Target scaler fitted successfully")
+            else:
+                logger.warning("No targets found in dataset, cannot fit target scaler")
+                self.scale_targets = False
+
+    def transform_with_scaler(self, dataset: EncoderDecoderSubset) -> EncoderDecoderSubset:
+        """
+        Transform the numeric features in the dataset using the fitted scaler.
+
+        Args:
+            dataset: Dataset to transform
+
+        Returns:
+            Transformed dataset
+        """
+        if not self.is_scaler_fitted:
+            logger.warning("Scaler not fitted, returning original dataset")
+            return dataset
+
+        logger.info(f"Transforming dataset with {type(self.scaler).__name__}")
+
+        # Create a new dataset with transformed features
+        class ScaledEncoderDecoderSubset(EncoderDecoderSubset):
+            def __init__(self, original_subset, scaler, target_scaler=None, scale_targets=False):
+                self.dataset = original_subset.dataset
+                self.indices = original_subset.indices
+                self.scaler = scaler
+                self.target_scaler = target_scaler
+                self.scale_targets = scale_targets
+
+            def __getitem__(self, idx):
+                x, y = super().__getitem__(idx)
+
+                # Transform numeric features
+                if "x_num_past" in x and x["x_num_past"].shape[1] > 0:
+                    # Get original shape for reshaping back after transformation
+                    orig_shape = x["x_num_past"].shape
+
+                    # Reshape to 2D for transformation
+                    features = x["x_num_past"].numpy().reshape(-1, orig_shape[1])
+
+                    # Transform and reshape back
+                    transformed = self.scaler.transform(features)
+                    x["x_num_past"] = torch.tensor(
+                        transformed.reshape(orig_shape), dtype=torch.float32
+                    )
+
+                    # Also update the backward compatibility key if present
+                    if "past_features" in x:
+                        x["past_features"] = x["x_num_past"]
+
+                # Transform targets if requested
+                if self.scale_targets and self.target_scaler is not None:
+                    if isinstance(y, torch.Tensor) and y.numel() > 0:
+                        orig_shape = y.shape
+                        targets = y.numpy().reshape(-1, orig_shape[-1])
+                        transformed = self.target_scaler.transform(targets)
+                        y = torch.tensor(transformed.reshape(orig_shape), dtype=torch.float32)
+
+                        # Also update the target in x dictionary
+                        if "y" in x:
+                            x["y"] = y
+                        if "future_targets" in x:
+                            x["future_targets"] = y
+
+                return x, y
+
+        # Create and return the scaled dataset
+        target_scaler = getattr(self, "target_scaler", None) if self.scale_targets else None
+        return ScaledEncoderDecoderSubset(dataset, self.scaler, target_scaler, self.scale_targets)
+
     def split_data(
         self,
         train_ratio: float = 0.7,
@@ -729,6 +870,16 @@ class EncoderDecoder(pl.LightningDataModule):
         val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
         test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
+        # Fit scaler on training data only
+        self.fit_scaler(train_dataset)
+
+        # Apply scaler to all datasets if fitted
+        if self.is_scaler_fitted:
+            logger.info("Applying fitted scaler to all datasets")
+            train_dataset = self.transform_with_scaler(train_dataset)
+            val_dataset = self.transform_with_scaler(val_dataset)
+            test_dataset = self.transform_with_scaler(test_dataset)
+
         logger.info("Dataset split complete")
         logger.info("============================================")
 
@@ -742,6 +893,16 @@ class EncoderDecoder(pl.LightningDataModule):
             self.train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
             self.val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
             self.test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
+
+            # Fit scaler on training data only
+            self.fit_scaler(self.train_dataset)
+
+            # Apply scaler to all datasets if fitted
+            if self.is_scaler_fitted:
+                logger.info("Applying fitted scaler to all datasets")
+                self.train_dataset = self.transform_with_scaler(self.train_dataset)
+                self.val_dataset = self.transform_with_scaler(self.val_dataset)
+                self.test_dataset = self.transform_with_scaler(self.test_dataset)
 
             logger.info(
                 f"Setup completed with split statistics: Train: {len(train_indices)}, "
