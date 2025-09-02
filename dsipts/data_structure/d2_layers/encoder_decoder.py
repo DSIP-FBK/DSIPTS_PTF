@@ -68,8 +68,7 @@ class EncoderDecoderDataset(Dataset):
         if cat_feature_cols is None:
             try:
                 # Access the cat_cols property from D1 dataset
-                cat_cols_from_d1 = d1_dataset.cat_cols
-                self.cat_feature_cols = cat_cols_from_d1 or []
+                self.cat_feature_cols = d1_dataset.cat_cols or []
                 logger.info(
                     f"Auto-detected categorical feature columns from D1: {self.cat_feature_cols}"
                 )
@@ -104,6 +103,23 @@ class EncoderDecoderDataset(Dataset):
         # Get the full group data from D1 dataset
         group_sample = self.d1_dataset[group_idx]
 
+        # Use D1 metadata as source of truth for indices
+        meta: Dict[str, Any] = getattr(self.d1_dataset, "metadata", {}) or {}
+        idx_categorical: List[int] = list(meta.get("idx_categorical", []))
+        feature_cols = meta.get("feature_cols", [])
+        enrich_cat = meta.get("enrich_cat", [])
+
+        # Add temporal enrichment keys to group sample for consistency
+        if len(idx_categorical) > 0 and len(feature_cols) > 0 and "x" in group_sample:
+            feature_idx_to_name = {idx: name for idx, name in enumerate(feature_cols)}
+
+            for cat_idx, orig_idx in enumerate(idx_categorical):
+                if orig_idx < len(feature_cols):
+                    col_name = feature_idx_to_name[orig_idx]
+                    if col_name in enrich_cat:
+                        # Add the temporal feature to group sample
+                        group_sample[f"{col_name}"] = group_sample["x"][:, orig_idx].long()
+
         # Log group sample structure
         if idx == 0:  # Only log for the first item to avoid excessive logging
             logger.info(f"Group sample keys: {list(group_sample.keys())}")
@@ -127,19 +143,11 @@ class EncoderDecoderDataset(Dataset):
         # Build clean input dictionary - only include keys when data is present
         x = {}
 
-        # Use D1 metadata as source of truth for indices
-        meta: Dict[str, Any] = getattr(self.d1_dataset, "metadata", {}) or {}
-        idx_categorical: List[int] = list(meta.get("idx_categorical", []))
+        # Get additional metadata for processing
         idx_known_future: List[int] = list(meta.get("idx_known_future", []))
         # TODO: remove idx_unknown_feature?
         idx_unknown_future: List[int] = list(meta.get("idx_unknown_future", []))  # noqa
         idx_targets_full: List[int] = list(meta.get("idx_targets", []))
-
-        # Get feature columns for mapping indices to column names
-        feature_cols = meta.get("feature_cols", [])
-
-        # Get temporal features from metadata if available
-        enrich_cat = meta.get("enrich_cat", [])
 
         # Ensure all temporal features are treated as categorical
         # This is a safety check in case idx_categorical doesn't include them
