@@ -221,9 +221,16 @@ class EncoderDecoderDataset(Dataset):
                 if orig_idx < len(feature_cols):
                     col_name = feature_idx_to_name[orig_idx]
                     if col_name in enrich_cat:
-                        # Add the temporal feature as a separate key
+                        # Add the temporal feature as a separate key for past values
                         x[f"{col_name}"] = X_past[:, orig_idx].long()
                         logger.debug(f"Added temporal feature '{col_name}' as separate key")
+
+                        # Add future temporal feature if we have future data
+                        if self.future_len > 0:
+                            x[f"{col_name}_future"] = X_future[:, orig_idx].long()
+                            logger.debug(
+                                f"Added future temporal feature '{col_name}_future' as separate key"
+                            )
 
         # Debug information (for tracing back to original CSV data)
         # Keep group_id for consistency and debugging

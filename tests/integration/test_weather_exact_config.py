@@ -78,7 +78,7 @@ def test_weather_exact_config():
         num_cols=["OT"],
         known_cols=None,
         unknown_cols=None,
-        enrich_cat=["minute", "hour"],
+        enrich_cat=["minute"],
         weights=None,
         memory_efficient=False,
         chunk_size=10000,
@@ -117,12 +117,26 @@ def test_weather_exact_config():
     # Check for temporal enrichment columns as separate keys
     temporal_features = ["hour", "dow", "month", "year", "minute"]
     temporal_keys = [key for key in x.keys() if key in temporal_features]
+    future_temporal_keys = [key for key in x.keys() if key.endswith("_future")]
     logger.info(f"Temporal enrichment keys: {temporal_keys}")
+    logger.info(f"Future temporal enrichment keys: {future_temporal_keys}")
 
-    # Verify each temporal feature is exposed
+    # Verify each temporal feature is exposed (both past and future)
     for feature in d1_dataset.metadata.get("enrich_cat", []):
+        # Check past feature
         assert feature in x, f"Expected temporal feature {feature} to be exposed directly"
         logger.info(f"Verified temporal feature '{feature}' is exposed directly")
+
+        # Check future feature
+        future_key = f"{feature}_future"
+        assert (
+            future_key in x
+        ), f"Expected future temporal feature {future_key} to be exposed directly"
+        logger.info(f"Verified future temporal feature '{future_key}' is exposed directly")
+
+        # Show sample values for both past and future
+        logger.info(f"Sample {feature} values (past, first 5): {x[feature][:5].tolist()}")
+        logger.info(f"Sample {future_key} values (future, first 5): {x[future_key][:5].tolist()}")
 
     # Log the keys in the input dictionary
     logger.info(f"Keys in input dictionary: {x.keys()}")
@@ -149,14 +163,25 @@ def test_weather_exact_config():
 
     # Log the batch structure
     logger.info("Batch structure from dataloader:")
+    logger.info("===== BATCH STRUCTURE DETAILS =====")
     for key, value in batch.items():
         if isinstance(value, torch.Tensor):
             logger.info(f"  {key}: tensor of shape {tuple(value.shape)}, dtype={value.dtype}")
+
+            # Show a sample of the tensor data (first item, first few elements)
+            if value.numel() > 0:
+                sample_data = value[0]
+                if sample_data.dim() > 0 and sample_data.shape[0] > 0:
+                    sample_str = str(sample_data[0 : min(5, sample_data.shape[0])].tolist())
+                    logger.info(f"    Sample data (first item, first 5 elements): {sample_str}")
         else:
             logger.info(f"  {key}: {type(value)}")
+            if isinstance(value, list) and len(value) > 0:
+                logger.info(f"    Sample: {value[0]}")
 
-    # Verify temporal features in batch structure
+    # Verify temporal features in batch structure (both past and future)
     for feature in d1_dataset.metadata.get("enrich_cat", []):
+        # Check past feature
         assert feature in batch, f"Expected temporal feature {feature} to be in batch"
         assert isinstance(batch[feature], torch.Tensor), f"Expected {feature} to be a tensor"
         assert (
@@ -166,14 +191,92 @@ def test_weather_exact_config():
             batch[feature].shape[1] == d2_dataset.past_len
         ), f"Expected {feature} to have length equal to past_len"
         logger.info(
-            f"Verified temporal feature '{feature}' in batch structure"
+            f"Verified temporal feature '{feature}' in batch structure "
             f"with shape {tuple(batch[feature].shape)}"
+        )
+
+        # Check future feature
+        future_key = f"{feature}_future"
+        assert future_key in batch, f"Expected future temporal feature {future_key} to be in batch"
+        assert isinstance(batch[future_key], torch.Tensor), f"Expected {future_key} to be a tensor"
+        assert (
+            batch[future_key].shape[0] == batch["x_num_past"].shape[0]
+        ), f"Expected {future_key} to have same batch size as x_num_past"
+        assert (
+            batch[future_key].shape[1] == d2_dataset.future_len
+        ), f"Expected {future_key} to have length equal to future_len"
+        logger.info(
+            f"Verified future temporal feature '{future_key}' in batch structure "
+            f"with shape {tuple(batch[future_key].shape)}"
         )
 
     # Check if x_cat_past exists in the batch
     assert "x_cat_past" in batch, "x_cat_past should be in the batch"
 
+    # Detailed explanation of each tensor in the output
+    logger.info("\n===== TENSOR EXPLANATIONS =====")
+    logger.info(
+        "x_num_past: Num features for past sequence (shape:batch_size x past_len x num_features)"
+    )
+    logger.info(
+        "x_cat_past: Cat features for past sequence (shape:batch_size x past_len x cat_features)"
+    )
+    logger.info(
+        "y: Target values for future sequence (shape:batch_size x future_len x target_dims)"
+    )
+    logger.info("idx_target: Indices of target columns (shape:batch_size x target_dims)")
+    logger.info("future_targets: Same as y, kept for backward compatibility")
+
+    # Explain temporal features (both past and future)
+    for feature in d1_dataset.metadata.get("enrich_cat", []):
+        logger.info(
+            f"{feature}: Temporal feature extracted from x_cat_past (shape: batch_size x past_len)"
+        )
+        logger.info(
+            f"{feature}_future: Future temporal feature extracted from x_cat_future (shape: batch_size x future_len)"  # noqa
+        )
+
+    logger.info("group_id: Identifier for the group/series this sample belongs to")
+    logger.info("time_idx: Time index for the start of each sample in the batch")
+
+    # Examine a single sample in detail
+    logger.info("\n===== SINGLE SAMPLE EXAMINATION =====")
+    sample_idx = 0
+    sample_x, sample_y = d2_dataset.dataset[sample_idx]
+    logger.info(f"Sample {sample_idx} details:")
+
+    # Get the window information
+    window = d2_dataset.valid_windows[sample_idx]
+    logger.info(f"Window info: group_idx={window['group_idx']}, start_idx={window['start_idx']}")
+
+    # Show the actual values for this sample
+    logger.info("Sample tensor values:")
+    for key, value in sample_x.items():
+        if isinstance(value, torch.Tensor):
+            if value.numel() <= 20:  # Show full tensor if small
+                logger.info(f"  {key}: {value.tolist()}")
+            else:  # Show just the first few elements
+                if value.dim() == 1:
+                    logger.info(f"  {key} (first 5): {value[:5].tolist()}")
+                elif value.dim() == 2:
+                    logger.info(
+                        f"  {key} (first 3x3): {[row[:min(3, value.shape[1])].tolist() for row in value[:min(3, value.shape[0])]]}"  # noqa
+                    )
+                else:
+                    logger.info(f"  {key}: tensor of shape {tuple(value.shape)}")
+        else:
+            logger.info(f"  {key}: {value}")
+
+    # Specifically highlight future categorical values
+    future_keys = [key for key in sample_x.keys() if key.endswith("_future")]
+    if future_keys:
+        logger.info("\nFuture categorical values:")
+        for key in future_keys:
+            if isinstance(sample_x[key], torch.Tensor):
+                logger.info(f"  {key}: {sample_x[key][:5].tolist()}")
+
     logger.info("Weather exact configuration test completed successfully")
+    print("X.keys: ", x.keys())
     return x, y, batch
 
 
