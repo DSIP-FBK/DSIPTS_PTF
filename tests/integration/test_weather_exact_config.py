@@ -121,22 +121,23 @@ def test_weather_exact_config():
     logger.info(f"Temporal enrichment keys: {temporal_keys}")
     logger.info(f"Future temporal enrichment keys: {future_temporal_keys}")
 
-    # Verify each temporal feature is exposed (both past and future)
+    # Verify each temporal feature is exposed for past values
     for feature in d1_dataset.metadata.get("enrich_cat", []):
         # Check past feature
         assert feature in x, f"Expected temporal feature {feature} to be exposed directly"
         logger.info(f"Verified temporal feature '{feature}' is exposed directly")
 
-        # Check future feature
-        future_key = f"{feature}_future"
-        assert (
-            future_key in x
-        ), f"Expected future temporal feature {future_key} to be exposed directly"
-        logger.info(f"Verified future temporal feature '{future_key}' is exposed directly")
-
-        # Show sample values for both past and future
+        # Show sample values for past
         logger.info(f"Sample {feature} values (past, first 5): {x[feature][:5].tolist()}")
-        logger.info(f"Sample {future_key} values (future, first 5): {x[future_key][:5].tolist()}")
+
+    # Check for x_cat_future instead of individual _future keys
+    assert "x_cat_future" in x, "Expected x_cat_future to be present in the dictionary"
+    logger.info(f"Verified x_cat_future is present with shape {tuple(x['x_cat_future'].shape)}")
+
+    # Show sample values for x_cat_future
+    logger.info(
+        f"Sample x_cat_future values (first 3x3): {[row[:min(3, x['x_cat_future'].shape[1])].tolist() for row in x['x_cat_future'][:min(3, x['x_cat_future'].shape[0])]]}"  # noqa: E501
+    )
 
     # Log the keys in the input dictionary
     logger.info(f"Keys in input dictionary: {x.keys()}")
@@ -179,7 +180,7 @@ def test_weather_exact_config():
             if isinstance(value, list) and len(value) > 0:
                 logger.info(f"    Sample: {value[0]}")
 
-    # Verify temporal features in batch structure (both past and future)
+    # Verify temporal features in batch structure (past only)
     for feature in d1_dataset.metadata.get("enrich_cat", []):
         # Check past feature
         assert feature in batch, f"Expected temporal feature {feature} to be in batch"
@@ -187,51 +188,35 @@ def test_weather_exact_config():
         assert (
             batch[feature].shape[0] == batch["x_num_past"].shape[0]
         ), f"Expected {feature} to have same batch size as x_num_past"
-        assert (
-            batch[feature].shape[1] == d2_dataset.past_len
-        ), f"Expected {feature} to have length equal to past_len"
-        logger.info(
-            f"Verified temporal feature '{feature}' in batch structure "
-            f"with shape {tuple(batch[feature].shape)}"
-        )
+        assert batch[feature].shape[1] == d2_dataset.past_len, f"Expected {feature} to have length equal to past_len"
+        logger.info(f"Verified temporal feature '{feature}' in batch structure " f"with shape {tuple(batch[feature].shape)}")
 
-        # Check future feature
-        future_key = f"{feature}_future"
-        assert future_key in batch, f"Expected future temporal feature {future_key} to be in batch"
-        assert isinstance(batch[future_key], torch.Tensor), f"Expected {future_key} to be a tensor"
-        assert (
-            batch[future_key].shape[0] == batch["x_num_past"].shape[0]
-        ), f"Expected {future_key} to have same batch size as x_num_past"
-        assert (
-            batch[future_key].shape[1] == d2_dataset.future_len
-        ), f"Expected {future_key} to have length equal to future_len"
-        logger.info(
-            f"Verified future temporal feature '{future_key}' in batch structure "
-            f"with shape {tuple(batch[future_key].shape)}"
-        )
+    # Check for x_cat_future instead of individual _future keys
+    assert "x_cat_future" in batch, "Expected x_cat_future to be in batch"
+    assert isinstance(batch["x_cat_future"], torch.Tensor), "Expected x_cat_future to be a tensor"
+    assert (
+        batch["x_cat_future"].shape[0] == batch["x_num_past"].shape[0]
+    ), "Expected x_cat_future to have same batch size as x_num_past"
+    assert batch["x_cat_future"].shape[1] == d2_dataset.future_len, "Expected x_cat_future to have length equal to future_len"
+    assert batch["x_cat_future"].shape[2] == len(
+        d1_dataset.metadata.get("idx_categorical", [])
+    ), "Expected x_cat_future to have feature dimension equal to number of categorical features"
+    logger.info(f"Verified x_cat_future in batch structure with shape {tuple(batch['x_cat_future'].shape)}")
 
     # Check if x_cat_past exists in the batch
     assert "x_cat_past" in batch, "x_cat_past should be in the batch"
 
     # Detailed explanation of each tensor in the output
     logger.info("\n===== TENSOR EXPLANATIONS =====")
-    logger.info(
-        "x_num_past: Num features for past sequence (shape:batch_size x past_len x num_features)"
-    )
-    logger.info(
-        "x_cat_past: Cat features for past sequence (shape:batch_size x past_len x cat_features)"
-    )
-    logger.info(
-        "y: Target values for future sequence (shape:batch_size x future_len x target_dims)"
-    )
+    logger.info("x_num_past: Num features for past sequence (shape:batch_size x past_len x num_features)")
+    logger.info("x_cat_past: Cat features for past sequence (shape:batch_size x past_len x cat_features)")
+    logger.info("y: Target values for future sequence (shape:batch_size x future_len x target_dims)")
     logger.info("idx_target: Indices of target columns (shape:batch_size x target_dims)")
     logger.info("future_targets: Same as y, kept for backward compatibility")
 
     # Explain temporal features (both past and future)
     for feature in d1_dataset.metadata.get("enrich_cat", []):
-        logger.info(
-            f"{feature}: Temporal feature extracted from x_cat_past (shape: batch_size x past_len)"
-        )
+        logger.info(f"{feature}: Temporal feature extracted from x_cat_past (shape: batch_size x past_len)")
         logger.info(
             f"{feature}_future: Future temporal feature extracted from x_cat_future (shape: batch_size x future_len)"  # noqa
         )

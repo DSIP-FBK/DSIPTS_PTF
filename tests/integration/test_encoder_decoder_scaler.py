@@ -66,10 +66,7 @@ def log_data_statistics(df, feature_cols, title="Data Statistics"):
 
     # Create a pretty table
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in s.items()}
-            for s in stats
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in s.items()} for s in stats],
         headers="keys",
         tablefmt="grid",
     )
@@ -78,9 +75,7 @@ def log_data_statistics(df, feature_cols, title="Data Statistics"):
     return stats
 
 
-def visualize_data_transformation(
-    original_data, transformed_data, feature_names, title="Data Transformation"
-):
+def visualize_data_transformation(original_data, transformed_data, feature_names, title="Data Transformation"):
     """Visualize the transformation of data before and after scaling."""
     # Select a subset of data points to display (first 5 rows)
     n_samples = min(5, len(original_data))
@@ -96,10 +91,7 @@ def visualize_data_transformation(
 
     # Create a pretty table
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()}
-            for row in table_data
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()} for row in table_data],
         headers="keys",
         tablefmt="grid",
     )
@@ -116,9 +108,7 @@ def test_standard_scaler():
 
     # Log original data statistics
     feature_cols = ["feature1", "feature2", "feature3"]
-    original_stats = log_data_statistics(
-        original_df, feature_cols, "Original Data Statistics (Before Scaling)"
-    )
+    original_stats = log_data_statistics(original_df, feature_cols, "Original Data Statistics (Before Scaling)")
 
     # Create D1 dataset
     d1_dataset = MultiSourceTSDataSet(
@@ -170,10 +160,7 @@ def test_standard_scaler():
         )
 
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()}
-            for p in scaler_params
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()} for p in scaler_params],
         headers="keys",
         tablefmt="grid",
     )
@@ -208,18 +195,13 @@ def test_standard_scaler():
                 "Scaled Mean": train_mean[i],
                 "Original Std": original_stats[i]["Std"],
                 "Scaled Std": train_std[i],
-                "Original Range": f"{original_stats[i]['Min']:.4f}"
-                f"              to {original_stats[i]['Max']:.4f}",
-                "Scaled Range": f"{np.min(train_features[:, i]):.4f}"
-                f"              to {np.max(train_features[:, i]):.4f}",
+                "Original Range": f"{original_stats[i]['Min']:.4f}" f"              to {original_stats[i]['Max']:.4f}",
+                "Scaled Range": f"{np.min(train_features[:, i]):.4f}" f"              to {np.max(train_features[:, i]):.4f}",
             }
         )
 
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()}
-            for row in comparison_table
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()} for row in comparison_table],
         headers="keys",
         tablefmt="grid",
     )
@@ -232,9 +214,7 @@ def test_standard_scaler():
     scaled_samples = train_features[:5, :]
 
     # Visualize the transformation
-    visualize_data_transformation(
-        original_samples, scaled_samples, feature_cols, "StandardScaler Transformation"
-    )
+    visualize_data_transformation(original_samples, scaled_samples, feature_cols, "StandardScaler Transformation")
 
     # After StandardScaler, mean should be close to 0 and std close to 1 for non-zero std columns
     # Get indices of columns with non-zero standard deviation in the original data
@@ -260,9 +240,7 @@ def test_custom_scaler():
 
     # Log original data statistics
     feature_cols = ["feature1", "feature2", "feature3"]
-    original_stats = log_data_statistics(
-        original_df, feature_cols, "Original Data Statistics (Before MinMax Scaling)"
-    )
+    original_stats = log_data_statistics(original_df, feature_cols, "Original Data Statistics (Before MinMax Scaling)")
 
     # Create D1 dataset
     d1_dataset = MultiSourceTSDataSet(
@@ -270,6 +248,7 @@ def test_custom_scaler():
         time_col="time",
         num_cols=feature_cols,
         target_cols=["target1", "target2"],
+        enrich_cat=["minute", "hour"],
     )
 
     # Create D2 dataset with MinMaxScaler
@@ -301,9 +280,7 @@ def test_custom_scaler():
     # test_features = test_sample["x_num_past"].numpy()
 
     # After MinMaxScaler, all values should be between 0 and 1
-    assert np.all(train_features >= 0) and np.all(
-        train_features <= 1
-    ), "MinMaxScaler should scale features between 0 and 1"
+    assert np.all(train_features >= 0) and np.all(train_features <= 1), "MinMaxScaler should scale features between 0 and 1"
 
     # Log scaled data statistics
     train_mean = np.mean(train_features, axis=0)
@@ -333,10 +310,7 @@ def test_custom_scaler():
         )
 
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()}
-            for row in comparison_table
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()} for row in comparison_table],
         headers="keys",
         tablefmt="grid",
     )
@@ -349,9 +323,7 @@ def test_custom_scaler():
     scaled_samples = train_features[:5, :]
 
     # Visualize the transformation
-    visualize_data_transformation(
-        original_samples, scaled_samples, feature_cols, "MinMaxScaler Transformation"
-    )
+    visualize_data_transformation(original_samples, scaled_samples, feature_cols, "MinMaxScaler Transformation")
 
     logger.info("Custom scaler (MinMaxScaler) test passed!")
     return True
@@ -374,14 +346,10 @@ def test_target_scaling():
     # )
 
     # Log original target statistics
-    target_stats = log_data_statistics(
-        original_df, target_cols, "Original Target Statistics (Before Scaling)"
-    )
+    target_stats = log_data_statistics(original_df, target_cols, "Original Target Statistics (Before Scaling)")
 
     # Create D1 dataset
-    d1_dataset = MultiSourceTSDataSet(
-        file_paths=[csv_path], time_col="time", num_cols=feature_cols, target_cols=target_cols
-    )
+    d1_dataset = MultiSourceTSDataSet(file_paths=[csv_path], time_col="time", num_cols=feature_cols, target_cols=target_cols)
 
     # Create D2 dataset with StandardScaler and target scaling
     d2_dataset = EncoderDecoder(
@@ -422,9 +390,7 @@ def test_target_scaling():
                 "Feature": col,
                 "Mean": d2_dataset.scaler.mean_[i],
                 "Std": np.sqrt(d2_dataset.scaler.var_)[i],
-                "Scale Factor": 1 / np.sqrt(d2_dataset.scaler.var_)[i]
-                if d2_dataset.scaler.var_[i] > 0
-                else 0,
+                "Scale Factor": 1 / np.sqrt(d2_dataset.scaler.var_)[i] if d2_dataset.scaler.var_[i] > 0 else 0,
             }
         )
 
@@ -435,27 +401,19 @@ def test_target_scaling():
                 "Target": col,
                 "Mean": d2_dataset.target_scaler.mean_[i],
                 "Std": np.sqrt(d2_dataset.target_scaler.var_)[i],
-                "Scale Factor": 1 / np.sqrt(d2_dataset.target_scaler.var_)[i]
-                if d2_dataset.target_scaler.var_[i] > 0
-                else 0,
+                "Scale Factor": 1 / np.sqrt(d2_dataset.target_scaler.var_)[i] if d2_dataset.target_scaler.var_[i] > 0 else 0,
             }
         )
 
     feature_table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()}
-            for p in feature_scaler_params
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()} for p in feature_scaler_params],
         headers="keys",
         tablefmt="grid",
     )
     logger.info(f"\nFeature Scaler Parameters:\n{feature_table}")
 
     target_table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()}
-            for p in target_scaler_params
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in p.items()} for p in target_scaler_params],
         headers="keys",
         tablefmt="grid",
     )
@@ -489,16 +447,12 @@ def test_target_scaling():
                 "Original Std": target_stats[i]["Std"],
                 "Scaled Std": train_target_std[i],
                 "Original Range": f"{target_stats[i]['Min']:.4f} to {target_stats[i]['Max']:.4f}",
-                "Scaled Range": f"{np.min(train_targets[:, i]):.4f} to"
-                f"                {np.max(train_targets[:, i]):.4f}",
+                "Scaled Range": f"{np.min(train_targets[:, i]):.4f} to" f"                {np.max(train_targets[:, i]):.4f}",
             }
         )
 
     table = tabulate(
-        [
-            {k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()}
-            for row in comparison_table
-        ],
+        [{k: f"{v:.4f}" if isinstance(v, (int, float)) else v for k, v in row.items()} for row in comparison_table],
         headers="keys",
         tablefmt="grid",
     )
@@ -529,9 +483,7 @@ def test_target_scaling():
     ), "Scaled train targets should have std close to 1"
 
     # Also check that the targets in the x dictionary are scaled
-    assert torch.allclose(
-        train_sample["y"], train_target
-    ), "y in sample dictionary should match the scaled target"
+    assert torch.allclose(train_sample["y"], train_target), "y in sample dictionary should match the scaled target"
     assert torch.allclose(
         train_sample["future_targets"], train_target
     ), "future_targets in sample dictionary should match the scaled target"

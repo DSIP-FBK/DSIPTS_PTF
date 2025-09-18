@@ -106,8 +106,9 @@ class TestTimeSeriesIntegration:
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
             group_cols=metadata["group_col"],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
             cat_cols=metadata["categorical_cols"],
+            global_forecasting=True,  # Enable global forecasting by default
         )
 
         # Test basic properties
@@ -124,11 +125,36 @@ class TestTimeSeriesIntegration:
         assert "past_time" in sample_item
         assert "y" in sample_item  # target data
         assert "x" in sample_item  # feature data
+
+        # Robust group_id checks
+        assert isinstance(sample_item["group_id"], int), "group_id should be integer"
+        assert "group_mapping" in d1.metadata, "Metadata should contain group_mapping"
+        assert sample_item["group_id"] in d1.metadata["reverse_mapping"], "group_id should exist in reverse mapping"
+
         # Check feature dimensions - x is a tensor
         assert isinstance(sample_item["x"], torch.Tensor)
         assert isinstance(sample_item["y"], torch.Tensor)
-        # Check that we have the expected number of features
-        assert sample_item["x"].shape[0] == len(metadata["feature_cols"])
+
+        # Print debug information
+        print(f"Sample item x shape: {sample_item['x'].shape}")
+        print(f"Sample item feature cols: {metadata['feature_cols']}")
+        print(f"D1 feature cols: {d1.feature_cols}")
+        print(f"D1 num cols: {d1.num_cols}")
+        print(f"D1 cat cols: {d1.cat_cols}")
+
+        # With global_forecasting=True, the group column is not added to categorical features
+        # The x tensor should include all numerical and categorical features
+        # Expected shape: [seq_len, n_features] where n_features = len(num_cols) + len(cat_cols)
+        expected_feature_count = len(metadata["feature_cols"]) + len(metadata["categorical_cols"])
+        assert sample_item["x"].shape[1] == expected_feature_count
+
+        # Verify consistency across samples
+        for i in range(min(10, len(d1))):  # Check first 10 samples
+            sample = d1[i]
+            assert isinstance(sample["group_id"], int), f"Sample {i} group_id not integer"
+            assert (
+                sample["group_id"] in d1.metadata["reverse_mapping"]
+            ), f"Sample {i} group_id {sample['group_id']} not in mapping"
 
     def test_d2_layer_initialization(self, sample_time_series_data):
         """Test D2 layer (EncoderDecoder) initialization and configuration."""
@@ -140,7 +166,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -184,6 +211,14 @@ class TestTimeSeriesIntegration:
         for key in required_keys:
             assert key in x, f"Missing required key: {key}"
 
+        # Robust group_id checks
+        assert isinstance(x["group_id"], list), "group_id should be a list"
+        assert all(isinstance(group_id, int) for group_id in x["group_id"]), "All group_id elements should be integers"
+        assert "group_mapping" in d2.d1_dataset.metadata, "Metadata should contain group_mapping"
+        assert all(
+            group_id in d2.d1_dataset.metadata["reverse_mapping"] for group_id in x["group_id"]
+        ), "All group_id elements should exist in reverse mapping"
+
     def test_d2_dataloader_functionality(self, sample_time_series_data):
         """Test D2 layer DataLoader functionality with custom collate function."""
         data_path, metadata = sample_time_series_data
@@ -194,7 +229,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -238,6 +274,14 @@ class TestTimeSeriesIntegration:
         assert batch["x_num_past"].shape[1] == d2.past_len
         assert batch["y"].shape[1] == d2.future_len
 
+        # Robust group_id checks
+        assert isinstance(batch["group_id"], torch.Tensor), "group_id should be a tensor"
+        assert batch["group_id"].dtype == torch.int64, "group_id tensor should be int64"
+        assert "group_mapping" in d2.d1_dataset.metadata, "Metadata should contain group_mapping"
+        assert all(
+            group_id.item() in d2.d1_dataset.metadata["reverse_mapping"] for group_id in batch["group_id"]
+        ), "All group_id elements should exist in reverse mapping"
+
         # Test validation dataloader if available
         if val_loader is not None:
             val_batch = next(iter(val_loader))
@@ -255,7 +299,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -274,9 +319,7 @@ class TestTimeSeriesIntegration:
 
         # Get dimensions from batch
         past_channels = batch["x_num_past"].shape[-1]
-        future_channels = (
-            batch["x_num_future"].shape[-1] if batch["x_num_future"].numel() > 0 else 0
-        )
+        future_channels = batch["x_num_future"].shape[-1] if batch["x_num_future"].numel() > 0 else 0
         out_channels = batch["y"].shape[-1]
 
         # Get categorical dimensions
@@ -326,7 +369,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -358,9 +402,7 @@ class TestTimeSeriesIntegration:
             # Initialize model on first batch
             if not model_initialized:
                 past_channels = batch["x_num_past"].shape[-1]
-                future_channels = (
-                    batch["x_num_future"].shape[-1] if batch["x_num_future"].numel() > 0 else 0
-                )
+                future_channels = batch["x_num_future"].shape[-1] if batch["x_num_future"].numel() > 0 else 0
                 out_channels = batch["y"].shape[-1]
 
                 model = LinearTS(
@@ -395,9 +437,7 @@ class TestTimeSeriesIntegration:
 
         # Check that all predictions have consistent shapes
         for pred, target in zip(predictions, targets):
-            assert (
-                pred.shape[:-1] == target.shape
-            ), f"Shape mismatch: {pred.shape} vs {target.shape}"
+            assert pred.shape[:-1] == target.shape, f"Shape mismatch: {pred.shape} vs {target.shape}"
             assert torch.isfinite(pred).all(), "Predictions contain non-finite values"
             assert torch.isfinite(target).all(), "Targets contain non-finite values"
 
@@ -411,7 +451,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -440,9 +481,7 @@ class TestTimeSeriesIntegration:
 
         for key, expected_type in model_expected_keys.items():
             assert key in batch, f"Missing model-expected key: {key}"
-            assert isinstance(
-                batch[key], expected_type
-            ), f"Key {key} has wrong type: {type(batch[key])}"
+            assert isinstance(batch[key], expected_type), f"Key {key} has wrong type: {type(batch[key])}"
 
         # Test backward compatibility keys
         backward_compat_keys = ["past_features", "future_targets"]
@@ -459,9 +498,7 @@ class TestTimeSeriesIntegration:
         class SimpleTestModel(torch.nn.Module):
             def __init__(self, past_steps, past_channels, future_steps, out_channels):
                 super().__init__()
-                self.linear = torch.nn.Linear(
-                    past_steps * past_channels, future_steps * out_channels
-                )
+                self.linear = torch.nn.Linear(past_steps * past_channels, future_steps * out_channels)
 
             def forward(self, batch):
                 x = batch["x_num_past"]  # Shape: [batch, past_steps, past_channels]
@@ -499,7 +536,8 @@ class TestTimeSeriesIntegration:
             group_cols=[metadata["group_col"]],
             time_col=metadata["time_col"],
             target_cols=[metadata["target_col"]],
-            feature_cols=metadata["feature_cols"],
+            num_cols=metadata["feature_cols"],  # Use feature_cols as num_cols
+            global_forecasting=True,  # Enable global forecasting by default
             cat_cols=metadata["categorical_cols"],
         )
 
@@ -524,9 +562,7 @@ class TestTimeSeriesIntegration:
         # Test that tensors are properly stacked
         for key, value in collated.items():
             if key not in ["group_id", "past_time", "future_time"]:  # These remain as lists
-                assert isinstance(
-                    value, torch.Tensor
-                ), f"Key {key} should be a tensor after collation"
+                assert isinstance(value, torch.Tensor), f"Key {key} should be a tensor after collation"
                 assert value.shape[0] == len(samples), f"Batch dimension mismatch for key {key}"
 
         # Test that list fields remain as lists
@@ -534,6 +570,12 @@ class TestTimeSeriesIntegration:
         for field in list_fields:
             if field in collated:
                 assert isinstance(collated[field], list), f"Field {field} should remain as list"
-                assert len(collated[field]) == len(
-                    samples
-                ), f"List length mismatch for field {field}"
+                assert len(collated[field]) == len(samples), f"List length mismatch for field {field}"
+
+        # Robust group_id checks
+        assert isinstance(collated["group_id"], list), "group_id should be a list"
+        assert all(isinstance(group_id, int) for group_id in collated["group_id"]), "All group_id elements should be integers"
+        assert "group_mapping" in d2.d1_dataset.metadata, "Metadata should contain group_mapping"
+        assert all(
+            group_id in d2.d1_dataset.metadata["reverse_mapping"] for group_id in collated["group_id"]
+        ), "All group_id elements should exist in reverse mapping"

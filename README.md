@@ -340,6 +340,98 @@ loss, quantile loss, MDA and a couple of experimental losses for minimizing the 
 # Usage
 In the folder `bash_examples` you can find an example in wich the library is used for training a model from command line using OmegaConf and Hydra with more updated models and examples. Please read the documentation [here](/bash_examples/README.md)
 
+## Feature Scaling
+
+The EncoderDecoder (D2) layer supports automatic scaling of numeric features using scikit-learn's scalers. This is particularly useful for models that are sensitive to feature scales, such as neural networks.
+
+### Using StandardScaler
+
+By default, the EncoderDecoder class can apply StandardScaler to normalize numeric features. The scaler is fitted only on the training dataset and then applied to all splits (train/validation/test).
+
+```python
+from dsipts.data_structure.d1_layers.multi_source_csv import MultiSourceTSDataSet
+from dsipts.data_structure.d2_layers.encoder_decoder import EncoderDecoder
+from sklearn.preprocessing import StandardScaler
+
+# Create D1 dataset
+d1_dataset = MultiSourceTSDataSet(
+    file_paths=["path/to/data.csv"],
+    time_col="time",
+    num_cols=["feature1", "feature2", "feature3"],
+    target_cols=["target"]
+)
+
+# Create D2 dataset with StandardScaler
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=StandardScaler(),  # Enable StandardScaler
+    scale_targets=False       # Don't scale targets
+)
+
+# Split data - scaler is fitted only on training data
+train_dataset, val_dataset, test_dataset = d2_dataset.split_data(
+    train_ratio=0.7,
+    val_ratio=0.15,
+    test_ratio=0.15,
+    method="temporal"
+)
+```
+
+### Custom Scalers
+
+You can use any scikit-learn compatible scaler:
+
+```python
+from sklearn.preprocessing import MinMaxScaler, RobustScaler
+
+# Using MinMaxScaler
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=MinMaxScaler(),  # Scale features to [0,1] range
+    scale_targets=False
+)
+
+# Using RobustScaler (handles outliers better)
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=RobustScaler(),  # Scale using median and quantiles
+    scale_targets=False
+)
+```
+
+### Scaling Target Variables
+
+You can also scale target variables, which can be useful for regression tasks:
+
+```python
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=StandardScaler(),
+    scale_targets=True  # Enable target scaling
+)
+```
+
+When `scale_targets=True`, a separate scaler instance is created and fitted only on the target variables from the training dataset.
+
+### Notes on Scaling
+
+- Scalers are fitted only on the training dataset to prevent data leakage
+- The same fitted scaler is applied to validation and test datasets
+- Categorical features are never scaled
+- Scaling is applied on-the-fly during dataset access via `__getitem__`
+- Original data in the D1 layer remains unchanged
 
 
 # Modifiers

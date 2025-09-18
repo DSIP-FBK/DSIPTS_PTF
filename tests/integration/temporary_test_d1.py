@@ -1,4 +1,6 @@
-"""Integration test for D1 and D2 layers.
+"""
+MAIN TEST FILE FOR D1
+Integration test for D1 and D2 layers.
 
 This module tests the integration between D1 (MultiSourceTSDataSet) and D2 (EncoderDecoder)
 layers without involving models. It verifies that the data pipeline works correctly
@@ -29,7 +31,7 @@ def temp_data_dir():
 
 def create_sample_data(
     temp_dir: str,
-    n_groups: int = 3,
+    n_groups: int = 4,
     n_timesteps: int = 100,
     n_num_features: int = 2,
     n_cat_features: int = 3,
@@ -115,8 +117,7 @@ def create_sample_data(
             noise = np.random.normal(0, 0.5, n_timesteps)
             group_data[col] = trend + seasonal + noise
             logger.debug(
-                f"Created numerical feature {col} with range:"
-                f" [{group_data[col].min():.2f}, {group_data[col].max():.2f}]"
+                f"Created numerical feature {col} with range:" f" [{group_data[col].min():.2f}, {group_data[col].max():.2f}]"
             )
 
         # Add categorical features
@@ -124,14 +125,9 @@ def create_sample_data(
         for i, col in enumerate(cat_cols):
             # Create categorical features with different cardinalities
             cardinality = 3 + i
-            group_data[col] = [
-                f"val_{np.random.randint(0, cardinality)}" for _ in range(n_timesteps)
-            ]
+            group_data[col] = [f"val_{np.random.randint(0, cardinality)}" for _ in range(n_timesteps)]
             unique_vals = set(group_data[col])
-            logger.debug(
-                f"Created categorical feature {col} with"
-                f" {len(unique_vals)} unique values: {unique_vals}"
-            )
+            logger.debug(f"Created categorical feature {col} with" f" {len(unique_vals)} unique values: {unique_vals}")
 
         # Add target variables
         logger.debug(f"Adding {len(target_cols)} target variables for group {group}")
@@ -152,8 +148,7 @@ def create_sample_data(
                 noise = np.random.normal(0, 2, n_timesteps)
                 group_data[col] = trend + seasonal + noise
                 logger.debug(
-                    f"Created synthetic target {col} with range:"
-                    f" [{group_data[col].min():.2f}, {group_data[col].max():.2f}]"
+                    f"Created synthetic target {col} with range:" f" [{group_data[col].min():.2f}, {group_data[col].max():.2f}]"
                 )
 
         # Convert to DataFrame and append to list
@@ -217,9 +212,7 @@ logger = logging.getLogger(__name__)
 test_name_csv = "test_basic_integration.csv"
 logger.info("\n[1/5] CREATING SAMPLE DATA")
 logger.info("-" * 40)
-data_path, metadata = create_sample_data(
-    file_path, debug=True, logger=logger, test_name_csv=test_name_csv
-)
+data_path, metadata = create_sample_data(file_path, debug=True, logger=logger, test_name_csv=test_name_csv)
 logger.info(f"✓ Sample data created at: {data_path}")
 logger.info(f"✓ Metadata keys: {list(metadata.keys())}")
 
@@ -257,14 +250,14 @@ d1 = MultiSourceTSDataSet(
     target_cols=metadata["target_cols"],
     group_cols=metadata["group_cols"],  # This is a list ["group_id"]
     num_cols=metadata["num_cols"],
+    known_cols=["num_0", "cat_0"],
     cat_cols=metadata["cat_cols"],
     global_forecasting=False,
-    enrich_cat=["hour", "dow"],
+    enrich_cat=["minute"],
 )
 logger.info(f"D1 initialized with group_cols={d1.group_cols}")
 logger.info(f"D1 has {len(d1)} groups")
 logger.info(f"D1 total length: {d1.total_length}")
-
 # Log D1 metadata
 logger.info("D1 metadata:")
 for key, value in d1.metadata.items():
@@ -277,3 +270,31 @@ for key, value in d1.metadata.items():
 logger.info("D1 categorical encoders:")
 for col, encoder in d1.label_encoders.items():
     logger.info(f"  {col}: {len(encoder.classes_)} classes")
+
+# [5/5] Inspecting a dataset item from D1 (__getitem__)
+logger.info("\n[5/5] INSPECTING D1 __getitem__ OUTPUT")
+logger.info("-" * 40)
+sample0 = d1[2]
+logger.info(f"Sample 0 - group_id: {sample0['group_id']}")
+logger.info(f"Sample 0 - seq_len: {sample0['seq_len']}")
+logger.info(f"Sample 0 - x shape: {tuple(sample0['x'].shape)}")
+logger.info(f"Sample 0 - y shape: {tuple(sample0['y'].shape)}")
+# Show small preview of features and targets
+logger.info(f"Sample 0 - x head:\n{sample0['x'][:5]}")
+logger.info(f"Sample 0 - y head:\n{sample0['y'][:5]}")
+
+# Verify categorical encoding applied only at retrieval (values should be ints; unknowns=-1)
+logger.info("Verifying categorical feature columns are encoded at retrieval time...")
+cat_cols = [c for c in d1.feature_cols if c in d1.cat_cols]
+num_cols = [c for c in d1.feature_cols if c in d1.num_cols]
+if cat_cols:
+    # In __getitem__, x = [num_features..., cat_features...] (targets excluded)
+    start = len(num_cols)
+    cat_indices = list(range(start, start + len(cat_cols)))
+    x_head = sample0["x"][:5].numpy()
+    cat_preview = x_head[:, cat_indices]
+    logger.info(f"Categorical feature columns (in x order): {cat_cols}")
+    logger.info(f"Categorical indices in x: {cat_indices}")
+    logger.info(f"Categorical preview (first 5 rows):\n{cat_preview}")
+else:
+    logger.info("No categorical feature columns.")

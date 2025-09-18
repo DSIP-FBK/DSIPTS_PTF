@@ -14,12 +14,11 @@ import pandas as pd
 import torch
 from sklearn.preprocessing import LabelEncoder
 
+from ..scalers import StandardScalerAdapter
 from .base_d1 import BaseD1Layer
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +54,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         weights: Optional[str] = None,
         memory_efficient: bool = False,
         chunk_size: int = 10000,
+        scaling_method: str = "minmax",
     ):
         """
         Initialize the MultiSourceTSDataSet.
@@ -81,6 +81,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             memory_efficient: Whether to use memory-efficient mode
             chunk_size: Chunk size for processing data (used in memory-efficient
                 mode)
+            scaling_method: Scaling method to use ('minmax' or 'standard')
         """
         super().__init__()
 
@@ -96,6 +97,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.use_dataframes = bool(dataframes)
         self._time_col = time_col
         self._weights = weights
+
+        # Validate and set scaling method
+        if scaling_method not in ["minmax", "standard"]:
+            raise ValueError(f"scaling_method must be 'minmax' or 'standard', got '{scaling_method}'")
+        self.scaling_method = scaling_method
+        logger.info(f"Using {scaling_method} scaling method")
 
         # Create pseudo file paths for dataframes for consistent processing
         if self.use_dataframes:
@@ -132,7 +139,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Set known and unknown columns with proper handling for None values
         self._known_cols = known_cols or []
         self._unknown_cols = unknown_cols or list(self._target_cols) if self._target_cols else []
-        # Store original user-provided known columns
+        # Store original user-provided known columns (before any auto-additions)
         self._original_known_cols = self._known_cols.copy() if self._known_cols else []
 
         # Handle global forecasting logic: if global_forecasting=False and multiple groups exist,
@@ -168,6 +175,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self._process_dataframes()
         else:
             self._process_files()
+
+        # Compute global scaling parameters (first pass)
+        self._compute_global_scaling_params()
+
         self._prepare_metadata()
         if not memory_efficient:
             self._preload_data()
@@ -196,14 +207,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Priority 1: (known_cols, num_cols & cat_cols & target_cols) and (enrich_cat) if specified
         # Approach 2: including targets (automatically handles the index cal logic with crrent code)
         if self._known_cols or self._num_cols or self._cat_cols or self._target_cols:
-            feature_cols = list(
-                dict.fromkeys(
-                    self._known_cols + self._num_cols + self._cat_cols + self._target_cols
-                )
-            )
-            logger.info(
-                f"Feature cols: known_cols + num_cols + cat_cols + target_cols: {feature_cols}"
-            )
+            feature_cols = list(dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols + self._target_cols))
+            logger.info(f"Feature cols: known_cols + num_cols + cat_cols + target_cols: {feature_cols}")
             # Add temporal features if specified
             if self._enrich_cat:
                 feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
@@ -300,9 +305,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         for group_col in self._group_cols:
             if group_col not in self._cat_cols:
                 self._cat_cols.append(group_col)
-                logger.info(
-                    f"Added group column '{group_col}' to categorical columns for label encoding"
-                )
+                logger.info(f"Added group column '{group_col}' to categorical columns for label encoding")
 
         # Add group columns to known columns (group identity is known at prediction time)
         for group_col in self._group_cols:
@@ -315,10 +318,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         valid_enrich_options = ["hour", "dow", "month", "minute"]
         for option in self._enrich_cat:
             if option not in valid_enrich_options:
-                raise ValueError(
-                    f"Invalid enrich_cat option: {option}. "
-                    f"Valid options are: {valid_enrich_options}"
-                )
+                raise ValueError(f"Invalid enrich_cat option: {option}. " f"Valid options are: {valid_enrich_options}")
 
             # Handle _cat_cols - this should be independent
             if option not in self._cat_cols:
@@ -346,10 +346,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         # If time_col is missing, create one as integer range and set as time_col
         if self._time_col not in chunk.columns:
-            logger.info(
-                f"Time column '{self._time_col}' not found."
-                f"Creating 'time' column as integer range."
-            )
+            logger.info(f"Time column '{self._time_col}' not found." f"Creating 'time' column as integer range.")
             chunk["time"] = range(len(chunk))
             self._time_col = "time"
 
@@ -360,13 +357,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
                 logger.info(f"Converted '{self._time_col}' to datetime.")
             except Exception as e:
                 # If conversion fails, check if int/float
-                if pd.api.types.is_integer_dtype(
-                    chunk[self._time_col]
-                ) or pd.api.types.is_float_dtype(chunk[self._time_col]):
-                    logger.info(
-                        f"Time column '{self._time_col}' is numeric (int/float)."
-                        f"Proceeding as numeric time."
-                    )
+                if pd.api.types.is_integer_dtype(chunk[self._time_col]) or pd.api.types.is_float_dtype(chunk[self._time_col]):
+                    logger.info(f"Time column '{self._time_col}' is numeric (int/float)." f"Proceeding as numeric time.")
                 else:
                     logger.warning(
                         f"Time column '{self._time_col}' cant be converted to datetime."
@@ -411,15 +403,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Returns:
             Dataset enriched with temporal categorical features
         """
-        logger.info(f"xxx Categorical columns before temporal enrichment: {self._cat_cols}")
         if not self._enrich_cat or self._time_col not in dataset.columns:
             return dataset
 
         # Ensure time column is datetime (should already be handled by _parse_and_enrich_chunk)
         if not pd.api.types.is_datetime64_any_dtype(dataset[self._time_col]):
-            logger.warning(
-                f"Time column {self._time_col} is not datetime type for temporal enrichment"
-            )
+            logger.warning(f"Time column {self._time_col} is not datetime type for temporal enrichment")
             return dataset
 
         # Add temporal features directly without mapping dict
@@ -462,16 +451,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         logger.info(f"Updated known_cols with enriched values: {self._known_cols}")
 
             self._is_file_read = True
-            logger.info(
-                f"Added temporal categorical features to categorical columns: {enriched_features}"
-            )
-            logger.info(
-                f"Added temporal categorical features to known columns: {enriched_features}"
-            )
-            logger.info(
-                "Label encoding will be applied to these enriched features during processing"
-            )
-        logger.info(f"xxx Categorical columns after temporal enrichment:  {self._cat_cols}")
+            logger.info(f"Added temporal categorical features to categorical columns: {enriched_features}")
+            logger.info(f"Added temporal categorical features to known columns: {enriched_features}")
+            logger.info("Label encoding will be applied to these enriched features during processing")
         return dataset
 
     @property
@@ -769,20 +751,15 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
                         # Log encoder creation
                         if col in self._group_cols:
-                            logger.info(
-                                f"Created label encoder for group column '{col}'"
-                                f"with {len(unique_values)} categories"
-                            )
+                            logger.info(f"Created label encoder for group column '{col}'" f"with {len(unique_values)} categories")
                         elif col in (self._enrich_cat or []):
                             logger.info(
-                                f"Created label encoder for enriched feature '{col}'"
-                                f"with {len(unique_values)} categories"
+                                f"Created label encoder for enriched feature '{col}'" f"with {len(unique_values)} categories"
                             )
                             logger.info(f"the unique values are: {unique_values}")
                         else:
                             logger.info(
-                                f"Created label encoder for categorical column '{col}'"
-                                f"with {len(unique_values)} categories"
+                                f"Created label encoder for categorical column '{col}'" f"with {len(unique_values)} categories"
                             )
                     else:
                         # Update existing encoder with new values
@@ -792,10 +769,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                             # Refit with all values (existing + new)
                             all_values = list(existing_categories) + list(new_values)
                             self.label_encoders[col].fit(np.array(all_values))
-                            logger.debug(
-                                f"Updated label encoder for column '{col}'"
-                                f"with {len(new_values)} new categories"
-                            )
+                            logger.debug(f"Updated label encoder for column '{col}'" f"with {len(new_values)} new categories")
                 # logger.info(f"Updated LE for {col} here is: {self.label_encoders[col].classes_}")
 
     def _apply_label_encoding(self, data):
@@ -837,9 +811,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         logger.warning(f"Could not encode column '{col}': {e}")
                         # Handle unknown categories by assigning -1 or keeping original values
                         if hasattr(self.label_encoders[col], "unknown_value"):
-                            data_encoded.loc[non_null_mask, col] = self.label_encoders[
-                                col
-                            ].unknown_value
+                            data_encoded.loc[non_null_mask, col] = self.label_encoders[col].unknown_value
 
         return data_encoded
 
@@ -927,34 +899,16 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         # Log memory usage if data is cached
         if hasattr(self, "cached_data") and self.cached_data:
-            total_mb = sum(df.memory_usage(deep=True).sum() for df in self.cached_data.values()) / (
-                1024**2
-            )
+            total_mb = sum(df.memory_usage(deep=True).sum() for df in self.cached_data.values()) / (1024**2)
             logger.info(f"Cached Data Memory Usage: {total_mb:.2f} MB")
 
         logger.info("-" * 80 + "\n")
 
         # Calculate feature indices
-        cat_indices = [
-            self.feature_cols.index(col)
-            for col in (self._cat_cols or [])
-            if col in self.feature_cols
-        ]
-        known_indices = [
-            self.feature_cols.index(col)
-            for col in (self._known_cols or [])
-            if col in self.feature_cols
-        ]
-        unknown_indices = [
-            self.feature_cols.index(col)
-            for col in (self._unknown_cols or [])
-            if col in self.feature_cols
-        ]
-        target_indices = [
-            self.feature_cols.index(col)
-            for col in (self._target_cols or [])
-            if col in self.feature_cols
-        ]
+        cat_indices = [self.feature_cols.index(col) for col in (self._cat_cols or []) if col in self.feature_cols]
+        known_indices = [self.feature_cols.index(col) for col in (self._known_cols or []) if col in self.feature_cols]
+        unknown_indices = [self.feature_cols.index(col) for col in (self._unknown_cols or []) if col in self.feature_cols]
+        target_indices = [self.feature_cols.index(col) for col in (self._target_cols or []) if col in self.feature_cols]
 
         logger.info("=" * 80 + "\n")
         # Prepare comprehensive metadata dictionary
@@ -1002,10 +956,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     else:
                         group_values = set()
                         for group_key, info in self.group_info.items():
-                            if (
-                                "original_values" in info
-                                and info["group_columns"] == self.group_cols
-                            ):
+                            if "original_values" in info and info["group_columns"] == self.group_cols:
                                 if len(info["original_values"]) == 1:
                                     group_values.add(str(info["original_values"][0]))
                         group_values = sorted(list(group_values))
@@ -1015,9 +966,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     categorical_mappings[col] = {
                         "categories": group_values,
                         "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(col)
-                        if col in self.feature_cols
-                        else -1,
+                        "feature_index": self.feature_cols.index(col) if col in self.feature_cols else -1,
                     }
                     logger.info(
                         f"  - {col}: {n_categories} categories{group_values[:5]}{'...' if n_categories > 5 else ''}"  # noqa: E501
@@ -1031,9 +980,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     categorical_mappings[col] = {
                         "categories": categories,
                         "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(col)
-                        if col in self.feature_cols
-                        else -1,
+                        "feature_index": self.feature_cols.index(col) if col in self.feature_cols else -1,
                     }
                     logger.info(
                         f"  - {col}: {n_categories} categories{categories[:5]}{'...' if n_categories > 5 else ''}"  # noqa: E501
@@ -1080,6 +1027,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.metadata["n_file_groups"] = len(self._group_ids)
         self.metadata["memory_efficient"] = self.memory_efficient
         self.metadata["file_paths"] = self.file_paths  # NEW: store file paths for reference
+        self.metadata["global_forecasting"] = self.global_forecasting  # Store global_forecasting flag
+
+        # Add scaling parameters to metadata
+        if hasattr(self, "scaling_params"):
+            self.metadata["scaling_params"] = self.scaling_params
+            logger.info(f"Added scaling parameters for {len(self.scaling_params)} columns to metadata")
 
         # Log final metadata summary
         logger.info("\nFINAL METADATA SUMMARY")
@@ -1115,18 +1068,13 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     categories = self.label_encoders[feature].classes_
                     n_categories = len(categories)
                     cardinalities[feature] = n_categories
-                    logger.info(
-                        f"Updated metadata with enriched feature "
-                        f"'{feature}': {n_categories} categories"
-                    )
+                    logger.info(f"Updated metadata with enriched feature " f"'{feature}': {n_categories} categories")
 
                     # Also update categorical_mappings
                     categorical_mappings[feature] = {
                         "categories": categories.tolist(),
                         "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(feature)
-                        if feature in self.feature_cols
-                        else -1,
+                        "feature_index": self.feature_cols.index(feature) if feature in self.feature_cols else -1,
                     }
 
             # Update metadata
@@ -1134,21 +1082,23 @@ class MultiSourceTSDataSet(BaseD1Layer):
             self.metadata["categorical_mappings"] = categorical_mappings
 
             # Calculate indices for known columns
-            known_indices = [
-                self.feature_cols.index(col) for col in self._known_cols if col in self.feature_cols
-            ]
+            known_indices = [self.feature_cols.index(col) for col in self._known_cols if col in self.feature_cols]
             self.metadata["idx_known"] = known_indices
             self.metadata["n_known"] = len(self._known_cols) if self._known_cols else 0
 
             # Update known_cols in metadata
             self.metadata["known_cols"] = self._known_cols.copy() if self._known_cols else []
+            self.metadata["original_known_cols"] = self._original_known_cols.copy() if self._original_known_cols else None
 
-            logger.info(f"Updated idx_known after enrichment: {known_indices}")
-            logger.info(f"Updated known_cols in metadata: {self.metadata['known_cols']}")
+            # Only log essential metadata at info level
+            if self._known_cols:
+                logger.info(f"Known columns: {len(self._known_cols)} columns")
 
-            # Log updated metadata
-            logger.info(f"Updated categorical_cardinalities: {cardinalities}")
-            logger.info(f"Updated categorical_mappings keys: {list(categorical_mappings.keys())}")
+            # Move detailed logs to debug level
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Known indices: {known_indices}")
+                logger.debug(f"Original known cols: {self.metadata['original_known_cols']}")
+                logger.debug(f"Categorical mappings: {list(categorical_mappings.keys()) if categorical_mappings else []}")
 
     def _preload_data(self):
         """
@@ -1312,6 +1262,28 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         return group_data
 
+    def _load_group_data_on_demand(self, file_group_key):
+        """
+        Load group data on demand for memory-efficient mode.
+
+        Args:
+            file_group_key: Tuple of (file_idx, group_key)
+
+        Returns:
+            DataFrame containing the group data
+        """
+        group_info = self.group_info[file_group_key]
+        file_path = group_info["file_path"]
+        group_key = group_info["group_key"]
+
+        # Load the file (could be cached at file level)
+        df = pd.read_csv(file_path)
+        df = self._parse_and_enrich_chunk(df)
+
+        # Extract group data without applying encoding
+        group_data = self._extract_group_data(df, group_key)
+        return group_data
+
     def _infer_frequency(self, time_col_data):
         """
         Infer the frequency of the time series data with improved logging.
@@ -1370,9 +1342,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             - metadata: Additional metadata
         """
         if idx >= len(self._group_ids):
-            raise IndexError(
-                f"Group index {idx} out of range. Available groups: {len(self._group_ids)}"
-            )
+            raise IndexError(f"Group index {idx} out of range. Available groups: {len(self._group_ids)}")
 
         # Get the file-group key for this group index
         file_group_key = self._group_ids[idx]
@@ -1457,9 +1427,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             y = torch.tensor(target_values, dtype=torch.float32)
 
             # Extract time indices
-            time_indices = (
-                group_data[self._time_col].tolist() if self._time_col in group_data.columns else []
-            )
+            time_indices = group_data[self._time_col].tolist() if self._time_col in group_data.columns else []
 
         # Prepare the group sample
         sample = {
@@ -1473,24 +1441,336 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         return sample
 
-    def _load_group_data_on_demand(self, file_group_key):
+    def _compute_global_scaling_params(self):
         """
-        Load group data on demand for memory-efficient mode.
+        Compute global scaling parameters across all files/dataframes.
+
+        This method performs a first pass through all data to compute scaling statistics
+        (min/max for minmax scaling or mean/std for standard scaling) for numerical columns
+        that will be used for scaling in the D2 layer.
+        """
+        if self.scaling_method == "minmax":
+            logger.info("Computing global min-max scaling parameters...")
+        else:
+            logger.info("Computing global standard scaling parameters...")
+
+        # Initialize scaling parameters dictionary
+        self.scaling_params = {}
+
+        # Get numerical columns that should be scaled (exclude categorical and time columns)
+        scalable_cols = []
+        for col in self._num_cols:
+            # Skip time column and group columns from scaling
+            if col != self._time_col and col not in self._group_cols:
+                scalable_cols.append(col)
+
+        if not scalable_cols:
+            logger.info("No numerical columns found for scaling")
+            return
+
+        logger.info(f"Computing scaling parameters for {len(scalable_cols)} numerical columns: {scalable_cols}")
+
+        if self.scaling_method == "minmax":
+            self._compute_minmax_scaling_params(scalable_cols)
+        else:  # standard scaling
+            self._compute_standard_scaling_params(scalable_cols)
+
+        logger.info(f"Computed scaling parameters for {len(self.scaling_params)} columns")
+
+    def _compute_minmax_scaling_params(self, scalable_cols):
+        """
+        Compute min-max scaling parameters for the specified columns.
 
         Args:
-            file_group_key: Tuple of (file_idx, group_key)
+            scalable_cols: List of column names to compute scaling parameters for
+        """
+        # Initialize min/max tracking
+        global_min = {}
+        global_max = {}
+
+        # First pass: compute global min and max
+        if self.use_dataframes:
+            # Process DataFrames
+            for df_idx, df in enumerate(self.dataframes):
+                logger.debug(f"Processing DataFrame {df_idx + 1}/{len(self.dataframes)} for scaling parameters")
+
+                # Apply parsing and enrichment to get consistent column structure
+                processed_df = self._parse_and_enrich_chunk(df.copy())
+                self._update_minmax_params(processed_df, scalable_cols, global_min, global_max)
+        else:
+            # Process files
+            for file_idx, file_path in enumerate(self.file_paths):
+                logger.debug(f"Processing file {file_idx + 1}/{len(self.file_paths)} for scaling parameters: {file_path}")
+
+                if self.memory_efficient:
+                    # Process in chunks for memory efficiency
+                    for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
+                        processed_chunk = self._parse_and_enrich_chunk(chunk)
+                        self._update_minmax_params(processed_chunk, scalable_cols, global_min, global_max)
+                else:
+                    # Load entire file
+                    df = pd.read_csv(file_path)
+                    processed_df = self._parse_and_enrich_chunk(df)
+                    self._update_minmax_params(processed_df, scalable_cols, global_min, global_max)
+
+        # Store scaling parameters
+        self.scaling_params = {}
+        for col in scalable_cols:
+            if col in global_min and col in global_max:
+                col_min = global_min[col]
+                col_max = global_max[col]
+
+                # Handle case where min == max (constant column)
+                if col_min == col_max:
+                    logger.warning(f"Column '{col}' has constant value {col_min}. Scaling will set it to 0.")
+                    self.scaling_params[col] = {
+                        "min": col_min,
+                        "max": col_max,
+                        "range": 1.0,  # Avoid division by zero
+                        "is_constant": True,
+                        "scaler_type": "minmax",
+                    }
+                else:
+                    self.scaling_params[col] = {
+                        "min": col_min,
+                        "max": col_max,
+                        "range": col_max - col_min,
+                        "is_constant": False,
+                        "scaler_type": "minmax",
+                    }
+
+                logger.debug(
+                    f"MinMax scaling params for '{col}': min={col_min:.4f}, max={col_max:.4f}, range={col_max - col_min:.4f}"
+                )
+
+    def _compute_standard_scaling_params(self, scalable_cols):
+        """
+        Compute standard scaling parameters for the specified columns using online algorithm.
+
+        Args:
+            scalable_cols: List of column names to compute scaling parameters for
+        """
+        # Initialize standard scaler
+        self.standard_scaler = StandardScalerAdapter(columns=scalable_cols)
+
+        # Create data iterator for fitting
+        def data_iterator():
+            if self.use_dataframes:
+                # Process DataFrames
+                for df_idx, df in enumerate(self.dataframes):
+                    logger.debug(f"Processing DataFrame {df_idx + 1}/{len(self.dataframes)} for standard scaling")
+                    processed_df = self._parse_and_enrich_chunk(df.copy())
+                    yield processed_df
+            else:
+                # Process files
+                for file_idx, file_path in enumerate(self.file_paths):
+                    logger.debug(f"Processing file {file_idx + 1}/{len(self.file_paths)} for standard scaling: {file_path}")
+
+                    if self.memory_efficient:
+                        # Process in chunks for memory efficiency
+                        for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
+                            processed_chunk = self._parse_and_enrich_chunk(chunk)
+                            yield processed_chunk
+                    else:
+                        # Load entire file
+                        df = pd.read_csv(file_path)
+                        processed_df = self._parse_and_enrich_chunk(df)
+                        yield processed_df
+
+        # Fit the standard scaler
+        self.standard_scaler.fit_dataframe_iterator(data_iterator())
+
+        # Get scaling parameters in DSIPTS format
+        self.scaling_params = self.standard_scaler.get_scaling_params()
+
+        # Apply standard scaling to cached data (if not memory efficient)
+        if not self.memory_efficient and hasattr(self, "cached_data") and self.cached_data:
+            logger.info("Applying standard scaling to cached data...")
+            scaled_groups = 0
+
+            for file_group_key in self.cached_data:
+                try:
+                    group_data = self.cached_data[file_group_key]
+
+                    # Apply standard scaling to the group data
+                    scaled_data = self.standard_scaler.transform_dataframe(group_data)
+
+                    # Update cached data
+                    self.cached_data[file_group_key] = scaled_data
+                    scaled_groups += 1
+
+                except Exception as e:
+                    logger.error(f"Error applying standard scaling to group {file_group_key}: {e}")
+                    continue
+
+            logger.info(f"Applied standard scaling to {scaled_groups} cached groups")
+        else:
+            logger.info("Standard scaling will be applied on-the-fly during data loading (memory-efficient mode)")
+
+        # Log the parameters
+        for col, params in self.scaling_params.items():
+            logger.debug(f"Standard scaling params for '{col}': mean={params['mean']:.4f}, std={params['std']:.4f}")
+
+    def _update_minmax_params(self, df, scalable_cols, global_min, global_max):
+        """
+        Update global min/max values with data from a DataFrame chunk.
+
+        Args:
+            df: DataFrame chunk to process
+            scalable_cols: List of columns to compute scaling parameters for
+            global_min: Dictionary to update with minimum values
+            global_max: Dictionary to update with maximum values
+        """
+        for col in scalable_cols:
+            if col in df.columns:
+                col_data = df[col].dropna()  # Remove NaN values
+                if len(col_data) > 0:
+                    col_min = col_data.min()
+                    col_max = col_data.max()
+
+                    if col not in global_min:
+                        global_min[col] = col_min
+                        global_max[col] = col_max
+                    else:
+                        global_min[col] = min(global_min[col], col_min)
+                        global_max[col] = max(global_max[col], col_max)
+
+    def get_scaling_params(self):
+        """
+        Get the computed scaling parameters.
 
         Returns:
-            DataFrame containing the group data
+            Dictionary containing scaling parameters for each numerical column
         """
-        group_info = self.group_info[file_group_key]
-        file_path = group_info["file_path"]
-        group_key = group_info["group_key"]
+        return getattr(self, "scaling_params", {})
 
-        # Load the file (could be cached at file level)
-        df = pd.read_csv(file_path)
-        df = self._parse_and_enrich_chunk(df)
+    def apply_inverse_scaling(self, data, columns=None):
+        """
+        Apply inverse scaling to denormalize data (supports both minmax and standard scaling).
 
-        # Extract group data without applying encoding
-        group_data = self._extract_group_data(df, group_key)
-        return group_data
+        Args:
+            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
+            columns: List of column names (required if data is numpy array or tensor)
+
+        Returns:
+            Denormalized data in the same format as input
+        """
+        if not hasattr(self, "scaling_params") or not self.scaling_params:
+            logger.warning("No scaling parameters available for inverse scaling")
+            return data
+
+        # Determine scaling method from parameters
+        if self.scaling_method == "standard" and hasattr(self, "standard_scaler"):
+            return self._apply_inverse_standard_scaling(data, columns)
+        else:
+            return self._apply_inverse_minmax_scaling(data, columns)
+
+    def _apply_inverse_minmax_scaling(self, data, columns=None):
+        """
+        Apply inverse min-max scaling to denormalize data.
+
+        Args:
+            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
+            columns: List of column names (required if data is numpy array or tensor)
+
+        Returns:
+            Denormalized data in the same format as input
+        """
+        if isinstance(data, pd.DataFrame):
+            result = data.copy()
+            for col in data.columns:
+                if col in self.scaling_params:
+                    params = self.scaling_params[col]
+                    if not params["is_constant"]:
+                        result[col] = data[col] * params["range"] + params["min"]
+                    else:
+                        result[col] = params["min"]  # Restore constant value
+            return result
+
+        elif isinstance(data, np.ndarray) and columns is not None:
+            result = data.copy()
+            for i, col in enumerate(columns):
+                if col in self.scaling_params and i < data.shape[1]:
+                    params = self.scaling_params[col]
+                    if not params["is_constant"]:
+                        result[:, i] = data[:, i] * params["range"] + params["min"]
+                    else:
+                        result[:, i] = params["min"]
+            return result
+
+        elif hasattr(data, "clone"):  # PyTorch tensor
+            result = data.clone()
+            if columns is not None:
+                for i, col in enumerate(columns):
+                    if col in self.scaling_params and i < data.shape[-1]:
+                        params = self.scaling_params[col]
+                        if not params["is_constant"]:
+                            result[..., i] = data[..., i] * params["range"] + params["min"]
+                        else:
+                            result[..., i] = params["min"]
+            return result
+
+        else:
+            logger.warning("Unsupported data type for inverse minmax scaling")
+            return data
+
+    def _apply_inverse_standard_scaling(self, data, columns=None):
+        """
+        Apply inverse standard scaling to denormalize data.
+
+        Args:
+            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
+            columns: List of column names (required if data is numpy array or tensor)
+
+        Returns:
+            Denormalized data in the same format as input
+        """
+        if isinstance(data, pd.DataFrame):
+            return self.standard_scaler.inverse_transform_dataframe(data)
+
+        elif isinstance(data, np.ndarray) and columns is not None:
+            # Create a temporary DataFrame for the scaler
+            temp_df = pd.DataFrame(data, columns=columns)
+            result_df = self.standard_scaler.inverse_transform_dataframe(temp_df)
+            return result_df.values
+
+        elif hasattr(data, "clone") and columns is not None:  # PyTorch tensor
+            return self.standard_scaler.inverse_transform_tensor(data, columns)
+
+        else:
+            logger.warning("Unsupported data type for inverse standard scaling")
+            return data
+
+    def _apply_scaling_to_tensor(self, tensor, feature_cols):
+        """
+        Apply scaling to a tensor using precomputed scaling parameters (supports both minmax and standard).
+
+        Args:
+            tensor: PyTorch tensor to scale [seq_len, n_features]
+            feature_cols: List of feature column names
+
+        Returns:
+            Scaled tensor
+        """
+        if not hasattr(self, "scaling_params") or not self.scaling_params or tensor.numel() == 0:
+            return tensor
+
+        if self.scaling_method == "standard" and hasattr(self, "standard_scaler"):
+            # Use standard scaler for tensor transformation
+            return self.standard_scaler.transform_tensor(tensor, feature_cols)
+        else:
+            # Use minmax scaling
+            scaled_tensor = tensor.clone()
+
+            for i, col in enumerate(feature_cols):
+                if col in self.scaling_params and i < tensor.shape[-1]:
+                    params = self.scaling_params[col]
+
+                    if not params["is_constant"]:
+                        # Apply min-max scaling: (x - min) / (max - min)
+                        scaled_tensor[..., i] = (tensor[..., i] - params["min"]) / params["range"]
+                    else:
+                        # For constant columns, set to 0
+                        scaled_tensor[..., i] = 0.0
+
+            return scaled_tensor
