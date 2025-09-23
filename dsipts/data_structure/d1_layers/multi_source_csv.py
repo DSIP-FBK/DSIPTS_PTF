@@ -14,7 +14,6 @@ import pandas as pd
 import torch
 from sklearn.preprocessing import LabelEncoder
 
-from ..scalers import StandardScalerAdapter
 from .base_d1 import BaseD1Layer
 
 # Configure logging
@@ -26,7 +25,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
     """
     Layer 1 (D1) dataset for multi-source time series data.
 
-    This dataset:
+    MultiSourceTSDataSet is a D1 layer implementation that:
+
     1. Loads time series data from multiple CSV files
     2. Handles categorical encoding and normalization
     3. Efficiently processes data in chunks for memory-efficient operation
@@ -34,8 +34,13 @@ class MultiSourceTSDataSet(BaseD1Layer):
     5. Supports temporal categorical enrichment
     6. Provides improved logging for frequency inference
 
-    It does NOT compute validity of windows or create sliding windows - that is
-    the responsibility of the D2 layer (TSDataProcessor).
+    It does NOT:
+    - Compute validity of windows or create sliding windows (D2 layer responsibility)
+    - Apply data scaling (moved to D2 layer to prevent data leakage)
+
+    IMPORTANT: Data scaling is now handled exclusively in the D2 layer to prevent
+    data leakage between train/validation/test splits. The D2 layer fits scalers
+    only on training data and applies them consistently across all splits.
     """
 
     def __init__(
@@ -54,7 +59,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         weights: Optional[str] = None,
         memory_efficient: bool = False,
         chunk_size: int = 10000,
-        scaling_method: str = "minmax",
     ):
         """
         Initialize the MultiSourceTSDataSet.
@@ -81,7 +85,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             memory_efficient: Whether to use memory-efficient mode
             chunk_size: Chunk size for processing data (used in memory-efficient
                 mode)
-            scaling_method: Scaling method to use ('minmax' or 'standard')
         """
         super().__init__()
 
@@ -98,11 +101,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._time_col = time_col
         self._weights = weights
 
-        # Validate and set scaling method
-        if scaling_method not in ["minmax", "standard"]:
-            raise ValueError(f"scaling_method must be 'minmax' or 'standard', got '{scaling_method}'")
-        self.scaling_method = scaling_method
-        logger.info(f"Using {scaling_method} scaling method")
+        # Note: Scaling is now handled in the D2 layer to prevent data leakage
+        # between train/validation/test splits
 
         # Create pseudo file paths for dataframes for consistent processing
         if self.use_dataframes:
@@ -176,8 +176,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         else:
             self._process_files()
 
-        # Compute global scaling parameters (first pass)
-        self._compute_global_scaling_params()
+        # Note: Scaling parameters are now computed in D2 layer to prevent data leakage
 
         self._prepare_metadata()
         if not memory_efficient:
@@ -1029,12 +1028,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.metadata["file_paths"] = self.file_paths  # NEW: store file paths for reference
         self.metadata["global_forecasting"] = self.global_forecasting  # Store global_forecasting flag
 
-        # Add scaling parameters to metadata
-        if hasattr(self, "scaling_params"):
-            self.metadata["scaling_params"] = self.scaling_params
-            logger.info(f"Added scaling parameters for {len(self.scaling_params)} columns to metadata")
+        # Note: Scaling parameters are now handled in D2 layer
 
-        # Log final metadata summary
         logger.info("\nFINAL METADATA SUMMARY")
         logger.info("=" * 80)
         for key, value in self.metadata.items():
@@ -1441,336 +1436,4 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         return sample
 
-    def _compute_global_scaling_params(self):
-        """
-        Compute global scaling parameters across all files/dataframes.
-
-        This method performs a first pass through all data to compute scaling statistics
-        (min/max for minmax scaling or mean/std for standard scaling) for numerical columns
-        that will be used for scaling in the D2 layer.
-        """
-        if self.scaling_method == "minmax":
-            logger.info("Computing global min-max scaling parameters...")
-        else:
-            logger.info("Computing global standard scaling parameters...")
-
-        # Initialize scaling parameters dictionary
-        self.scaling_params = {}
-
-        # Get numerical columns that should be scaled (exclude categorical and time columns)
-        scalable_cols = []
-        for col in self._num_cols:
-            # Skip time column and group columns from scaling
-            if col != self._time_col and col not in self._group_cols:
-                scalable_cols.append(col)
-
-        if not scalable_cols:
-            logger.info("No numerical columns found for scaling")
-            return
-
-        logger.info(f"Computing scaling parameters for {len(scalable_cols)} numerical columns: {scalable_cols}")
-
-        if self.scaling_method == "minmax":
-            self._compute_minmax_scaling_params(scalable_cols)
-        else:  # standard scaling
-            self._compute_standard_scaling_params(scalable_cols)
-
-        logger.info(f"Computed scaling parameters for {len(self.scaling_params)} columns")
-
-    def _compute_minmax_scaling_params(self, scalable_cols):
-        """
-        Compute min-max scaling parameters for the specified columns.
-
-        Args:
-            scalable_cols: List of column names to compute scaling parameters for
-        """
-        # Initialize min/max tracking
-        global_min = {}
-        global_max = {}
-
-        # First pass: compute global min and max
-        if self.use_dataframes:
-            # Process DataFrames
-            for df_idx, df in enumerate(self.dataframes):
-                logger.debug(f"Processing DataFrame {df_idx + 1}/{len(self.dataframes)} for scaling parameters")
-
-                # Apply parsing and enrichment to get consistent column structure
-                processed_df = self._parse_and_enrich_chunk(df.copy())
-                self._update_minmax_params(processed_df, scalable_cols, global_min, global_max)
-        else:
-            # Process files
-            for file_idx, file_path in enumerate(self.file_paths):
-                logger.debug(f"Processing file {file_idx + 1}/{len(self.file_paths)} for scaling parameters: {file_path}")
-
-                if self.memory_efficient:
-                    # Process in chunks for memory efficiency
-                    for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
-                        processed_chunk = self._parse_and_enrich_chunk(chunk)
-                        self._update_minmax_params(processed_chunk, scalable_cols, global_min, global_max)
-                else:
-                    # Load entire file
-                    df = pd.read_csv(file_path)
-                    processed_df = self._parse_and_enrich_chunk(df)
-                    self._update_minmax_params(processed_df, scalable_cols, global_min, global_max)
-
-        # Store scaling parameters
-        self.scaling_params = {}
-        for col in scalable_cols:
-            if col in global_min and col in global_max:
-                col_min = global_min[col]
-                col_max = global_max[col]
-
-                # Handle case where min == max (constant column)
-                if col_min == col_max:
-                    logger.warning(f"Column '{col}' has constant value {col_min}. Scaling will set it to 0.")
-                    self.scaling_params[col] = {
-                        "min": col_min,
-                        "max": col_max,
-                        "range": 1.0,  # Avoid division by zero
-                        "is_constant": True,
-                        "scaler_type": "minmax",
-                    }
-                else:
-                    self.scaling_params[col] = {
-                        "min": col_min,
-                        "max": col_max,
-                        "range": col_max - col_min,
-                        "is_constant": False,
-                        "scaler_type": "minmax",
-                    }
-
-                logger.debug(
-                    f"MinMax scaling params for '{col}': min={col_min:.4f}, max={col_max:.4f}, range={col_max - col_min:.4f}"
-                )
-
-    def _compute_standard_scaling_params(self, scalable_cols):
-        """
-        Compute standard scaling parameters for the specified columns using online algorithm.
-
-        Args:
-            scalable_cols: List of column names to compute scaling parameters for
-        """
-        # Initialize standard scaler
-        self.standard_scaler = StandardScalerAdapter(columns=scalable_cols)
-
-        # Create data iterator for fitting
-        def data_iterator():
-            if self.use_dataframes:
-                # Process DataFrames
-                for df_idx, df in enumerate(self.dataframes):
-                    logger.debug(f"Processing DataFrame {df_idx + 1}/{len(self.dataframes)} for standard scaling")
-                    processed_df = self._parse_and_enrich_chunk(df.copy())
-                    yield processed_df
-            else:
-                # Process files
-                for file_idx, file_path in enumerate(self.file_paths):
-                    logger.debug(f"Processing file {file_idx + 1}/{len(self.file_paths)} for standard scaling: {file_path}")
-
-                    if self.memory_efficient:
-                        # Process in chunks for memory efficiency
-                        for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
-                            processed_chunk = self._parse_and_enrich_chunk(chunk)
-                            yield processed_chunk
-                    else:
-                        # Load entire file
-                        df = pd.read_csv(file_path)
-                        processed_df = self._parse_and_enrich_chunk(df)
-                        yield processed_df
-
-        # Fit the standard scaler
-        self.standard_scaler.fit_dataframe_iterator(data_iterator())
-
-        # Get scaling parameters in DSIPTS format
-        self.scaling_params = self.standard_scaler.get_scaling_params()
-
-        # Apply standard scaling to cached data (if not memory efficient)
-        if not self.memory_efficient and hasattr(self, "cached_data") and self.cached_data:
-            logger.info("Applying standard scaling to cached data...")
-            scaled_groups = 0
-
-            for file_group_key in self.cached_data:
-                try:
-                    group_data = self.cached_data[file_group_key]
-
-                    # Apply standard scaling to the group data
-                    scaled_data = self.standard_scaler.transform_dataframe(group_data)
-
-                    # Update cached data
-                    self.cached_data[file_group_key] = scaled_data
-                    scaled_groups += 1
-
-                except Exception as e:
-                    logger.error(f"Error applying standard scaling to group {file_group_key}: {e}")
-                    continue
-
-            logger.info(f"Applied standard scaling to {scaled_groups} cached groups")
-        else:
-            logger.info("Standard scaling will be applied on-the-fly during data loading (memory-efficient mode)")
-
-        # Log the parameters
-        for col, params in self.scaling_params.items():
-            logger.debug(f"Standard scaling params for '{col}': mean={params['mean']:.4f}, std={params['std']:.4f}")
-
-    def _update_minmax_params(self, df, scalable_cols, global_min, global_max):
-        """
-        Update global min/max values with data from a DataFrame chunk.
-
-        Args:
-            df: DataFrame chunk to process
-            scalable_cols: List of columns to compute scaling parameters for
-            global_min: Dictionary to update with minimum values
-            global_max: Dictionary to update with maximum values
-        """
-        for col in scalable_cols:
-            if col in df.columns:
-                col_data = df[col].dropna()  # Remove NaN values
-                if len(col_data) > 0:
-                    col_min = col_data.min()
-                    col_max = col_data.max()
-
-                    if col not in global_min:
-                        global_min[col] = col_min
-                        global_max[col] = col_max
-                    else:
-                        global_min[col] = min(global_min[col], col_min)
-                        global_max[col] = max(global_max[col], col_max)
-
-    def get_scaling_params(self):
-        """
-        Get the computed scaling parameters.
-
-        Returns:
-            Dictionary containing scaling parameters for each numerical column
-        """
-        return getattr(self, "scaling_params", {})
-
-    def apply_inverse_scaling(self, data, columns=None):
-        """
-        Apply inverse scaling to denormalize data (supports both minmax and standard scaling).
-
-        Args:
-            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
-            columns: List of column names (required if data is numpy array or tensor)
-
-        Returns:
-            Denormalized data in the same format as input
-        """
-        if not hasattr(self, "scaling_params") or not self.scaling_params:
-            logger.warning("No scaling parameters available for inverse scaling")
-            return data
-
-        # Determine scaling method from parameters
-        if self.scaling_method == "standard" and hasattr(self, "standard_scaler"):
-            return self._apply_inverse_standard_scaling(data, columns)
-        else:
-            return self._apply_inverse_minmax_scaling(data, columns)
-
-    def _apply_inverse_minmax_scaling(self, data, columns=None):
-        """
-        Apply inverse min-max scaling to denormalize data.
-
-        Args:
-            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
-            columns: List of column names (required if data is numpy array or tensor)
-
-        Returns:
-            Denormalized data in the same format as input
-        """
-        if isinstance(data, pd.DataFrame):
-            result = data.copy()
-            for col in data.columns:
-                if col in self.scaling_params:
-                    params = self.scaling_params[col]
-                    if not params["is_constant"]:
-                        result[col] = data[col] * params["range"] + params["min"]
-                    else:
-                        result[col] = params["min"]  # Restore constant value
-            return result
-
-        elif isinstance(data, np.ndarray) and columns is not None:
-            result = data.copy()
-            for i, col in enumerate(columns):
-                if col in self.scaling_params and i < data.shape[1]:
-                    params = self.scaling_params[col]
-                    if not params["is_constant"]:
-                        result[:, i] = data[:, i] * params["range"] + params["min"]
-                    else:
-                        result[:, i] = params["min"]
-            return result
-
-        elif hasattr(data, "clone"):  # PyTorch tensor
-            result = data.clone()
-            if columns is not None:
-                for i, col in enumerate(columns):
-                    if col in self.scaling_params and i < data.shape[-1]:
-                        params = self.scaling_params[col]
-                        if not params["is_constant"]:
-                            result[..., i] = data[..., i] * params["range"] + params["min"]
-                        else:
-                            result[..., i] = params["min"]
-            return result
-
-        else:
-            logger.warning("Unsupported data type for inverse minmax scaling")
-            return data
-
-    def _apply_inverse_standard_scaling(self, data, columns=None):
-        """
-        Apply inverse standard scaling to denormalize data.
-
-        Args:
-            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
-            columns: List of column names (required if data is numpy array or tensor)
-
-        Returns:
-            Denormalized data in the same format as input
-        """
-        if isinstance(data, pd.DataFrame):
-            return self.standard_scaler.inverse_transform_dataframe(data)
-
-        elif isinstance(data, np.ndarray) and columns is not None:
-            # Create a temporary DataFrame for the scaler
-            temp_df = pd.DataFrame(data, columns=columns)
-            result_df = self.standard_scaler.inverse_transform_dataframe(temp_df)
-            return result_df.values
-
-        elif hasattr(data, "clone") and columns is not None:  # PyTorch tensor
-            return self.standard_scaler.inverse_transform_tensor(data, columns)
-
-        else:
-            logger.warning("Unsupported data type for inverse standard scaling")
-            return data
-
-    def _apply_scaling_to_tensor(self, tensor, feature_cols):
-        """
-        Apply scaling to a tensor using precomputed scaling parameters (supports both minmax and standard).
-
-        Args:
-            tensor: PyTorch tensor to scale [seq_len, n_features]
-            feature_cols: List of feature column names
-
-        Returns:
-            Scaled tensor
-        """
-        if not hasattr(self, "scaling_params") or not self.scaling_params or tensor.numel() == 0:
-            return tensor
-
-        if self.scaling_method == "standard" and hasattr(self, "standard_scaler"):
-            # Use standard scaler for tensor transformation
-            return self.standard_scaler.transform_tensor(tensor, feature_cols)
-        else:
-            # Use minmax scaling
-            scaled_tensor = tensor.clone()
-
-            for i, col in enumerate(feature_cols):
-                if col in self.scaling_params and i < tensor.shape[-1]:
-                    params = self.scaling_params[col]
-
-                    if not params["is_constant"]:
-                        # Apply min-max scaling: (x - min) / (max - min)
-                        scaled_tensor[..., i] = (tensor[..., i] - params["min"]) / params["range"]
-                    else:
-                        # For constant columns, set to 0
-                        scaled_tensor[..., i] = 0.0
-
-            return scaled_tensor
+    # Note: Scaling methods have been moved to D2 layer to prevent data leakage
