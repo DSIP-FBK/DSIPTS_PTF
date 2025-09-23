@@ -1,13 +1,18 @@
-"""
-Online scaling utilities for time series data preprocessing.
+"""Online scaling utilities for time series data preprocessing.
 
 This module provides scalers that can compute statistics incrementally
 without loading all data into memory at once, making them suitable for
 large datasets and streaming scenarios.
+
+Key features:
+- Manual scaling implementations (no sklearn dependencies)
+- Support for both memory-efficient and in-memory modes
+- Standard (z-score) and MinMax (0-1) scaling methods
+- Online/incremental statistics computation for large datasets
+- Inverse scaling for denormalization
 """
 
 import logging
-from typing import Any, Dict, Iterator, Optional
 
 import numpy as np
 import pandas as pd
@@ -16,425 +21,385 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-class OnlineStandardScaler:
+class StatsRecorder:
     """
-    Computes the mean and standard deviation in an online fashion, batch by batch.
-    This is useful for large datasets that don't fit into memory.
-
-    The scaler performs two main operations:
-    1. fit(): Iterates through all batches of data once to compute the final
-              mean and variance of the entire dataset.
-    2. transform(): Applies the standardization (z-score normalization) using the
-                    computed global mean and standard deviation.
-
-    The update formulas are based on Welford's algorithm for online variance
-    calculation, extended for batches.
+    Online statistics recorder for computing mean and std incrementally.
+    Useful for memory-efficient scaling parameter computation.
     """
 
-    def __init__(self, epsilon: float = 1e-8):
+    def __init__(self, data=None):
         """
-        Initialize the online standard scaler.
-
-        Args:
-            epsilon (float): Small value added to std dev to prevent division by zero
+        data: ndarray, shape (nobservations, ndimensions)
         """
-        self.n_samples_seen_ = 0
-        self.mean_ = None
-        self.var_ = None
-        self.scale_ = None
-        self.n_features_in_ = 0
-        self.epsilon = epsilon
-        self.is_fitted_ = False
-
-    def _partial_fit(self, batch: np.ndarray):
-        """
-        Update the running mean and variance with a single batch of data.
-
-        Args:
-            batch (np.ndarray): New batch of data, shape (n_samples, n_features)
-        """
-        batch = np.atleast_2d(batch)
-
-        # Handle the very first batch to initialize dimensions
-        if self.n_samples_seen_ == 0:
-            self.n_features_in_ = batch.shape[1]
-            self.mean_ = np.zeros(self.n_features_in_)
-            self.var_ = np.zeros(self.n_features_in_)
-
-        if batch.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"Batch has {batch.shape[1]} features, but scaler was fitted " f"with {self.n_features_in_} features."
-            )
-
-        # Get stats for the new batch
-        new_count = batch.shape[0]
-        new_mean = np.mean(batch, axis=0)
-        new_var = np.var(batch, axis=0, ddof=0)  # Population variance
-
-        # Store old stats before updating
-        old_count = self.n_samples_seen_
-        old_mean = self.mean_.copy()
-        old_var = self.var_.copy()
-
-        # Update total count
-        self.n_samples_seen_ += new_count
-
-        # If it's not the first batch, update mean and variance
-        if old_count > 0:
-            # Update mean using weighted average formula
-            self.mean_ = (old_count * old_mean + new_count * new_mean) / self.n_samples_seen_
-
-            # Update variance using the formula for combining variances of two groups
-            # Formula: Var_combined = (m*Var_m + n*Var_n)/(m+n) + (m*n)/(m+n)^2 * (Mean_m - Mean_n)^2
-            term1 = old_count * old_var
-            term2 = new_count * new_var
-            term3 = (old_count * new_count / self.n_samples_seen_**2) * (old_mean - new_mean) ** 2
-            self.var_ = (term1 + term2) / self.n_samples_seen_ + term3
+        if data is not None:
+            data = np.atleast_2d(data)
+            self.mean = data.mean(axis=0)
+            self.std = data.std(axis=0)
+            self.nobservations = data.shape[0]
+            self.ndimensions = data.shape[1]
         else:
-            # For the first batch, the global stats are just the batch stats
-            self.mean_ = new_mean
-            self.var_ = new_var
+            self.nobservations = 0
 
-    def fit(self, data_iterator: Iterator[np.ndarray]):
+    def update(self, data):
         """
-        Compute the final mean and variance by iterating through all data batches.
-        This is the "metadata calculation" pass.
-
-        Args:
-            data_iterator (Iterator[np.ndarray]): Iterator that yields batches of data
-
-        Returns:
-            self: The fitted scaler instance
+        data: ndarray, shape (nobservations, ndimensions)
         """
-        logger.info("Fitting OnlineStandardScaler...")
-        self.n_samples_seen_ = 0  # Reset for a new fit
+        if self.nobservations == 0:
+            self.__init__(data)
+        else:
+            data = np.atleast_2d(data)
+            if data.shape[1] != self.ndimensions:
+                raise ValueError("Data dims don't match prev observations.")
 
-        batch_count = 0
-        for batch in data_iterator:
-            self._partial_fit(batch)
-            batch_count += 1
+            newmean = data.mean(axis=0)
+            newstd = data.std(axis=0)
 
-        if self.n_samples_seen_ == 0:
-            raise ValueError("No data provided to fit the scaler")
+            m = self.nobservations * 1.0
+            n = data.shape[0]
 
-        # Finalize the scale (standard deviation) after seeing all data
-        self.scale_ = np.sqrt(self.var_ + self.epsilon)
-        self.is_fitted_ = True
+            tmp = self.mean
 
-        logger.info(
-            f"OnlineStandardScaler fitted on {self.n_samples_seen_} samples "
-            f"across {batch_count} batches with {self.n_features_in_} features"
-        )
-        logger.info(f"Final mean: {self.mean_}")
-        logger.info(f"Final std: {self.scale_}")
+            self.mean = m / (m + n) * tmp + n / (m + n) * newmean
+            self.std = m / (m + n) * self.std**2 + n / (m + n) * newstd**2 + m * n / (m + n) ** 2 * (tmp - newmean) ** 2
+            self.std = np.sqrt(self.std)
 
-        return self
-
-    def transform(self, batch: np.ndarray) -> np.ndarray:
-        """
-        Standardize a batch of data using the fitted mean and scale.
-
-        Args:
-            batch (np.ndarray): The data to transform
-
-        Returns:
-            np.ndarray: The standardized data
-        """
-        if not self.is_fitted_:
-            raise RuntimeError("This scaler instance is not fitted yet. Call 'fit' first.")
-
-        batch = np.atleast_2d(batch)
-        if batch.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"Batch has {batch.shape[1]} features, but scaler was fitted " f"with {self.n_features_in_} features."
-            )
-
-        return (batch - self.mean_) / self.scale_
-
-    def inverse_transform(self, batch: np.ndarray) -> np.ndarray:
-        """
-        Reverse the standardization transformation.
-
-        Args:
-            batch (np.ndarray): The standardized data to inverse transform
-
-        Returns:
-            np.ndarray: The original scale data
-        """
-        if not self.is_fitted_:
-            raise RuntimeError("This scaler instance is not fitted yet. Call 'fit' first.")
-
-        batch = np.atleast_2d(batch)
-        if batch.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"Batch has {batch.shape[1]} features, but scaler was fitted " f"with {self.n_features_in_} features."
-            )
-
-        return batch * self.scale_ + self.mean_
-
-    def get_params(self) -> Dict[str, Any]:
-        """
-        Get the scaling parameters.
-
-        Returns:
-            Dictionary containing mean, std, and other parameters
-        """
-        if not self.is_fitted_:
-            return {}
-
-        return {
-            "mean": self.mean_.copy(),
-            "std": self.scale_.copy(),
-            "var": self.var_.copy(),
-            "n_samples_seen": self.n_samples_seen_,
-            "n_features": self.n_features_in_,
-            "epsilon": self.epsilon,
-        }
-
-    def fit_transform(self, data_iterator: Iterator[np.ndarray]) -> np.ndarray:
-        """
-        Fit the scaler on all data and then transform the entire dataset.
-
-        NOTE: This method must store all data in memory to return the transformed
-        version, which might defeat the purpose of online scaling for very large datasets.
-        It's provided for convenience, similar to scikit-learn's API.
-
-        Args:
-            data_iterator (Iterator[np.ndarray]): Iterator that yields batches of data
-
-        Returns:
-            np.ndarray: The entire standardized dataset
-        """
-        # Store all batches in a list during the fit pass
-        all_data_list = []
-
-        def fit_and_store_iterator():
-            for batch in data_iterator:
-                all_data_list.append(batch)
-                yield batch
-
-        self.fit(fit_and_store_iterator())
-
-        # Concatenate and transform
-        if not all_data_list:
-            return np.array([])
-
-        full_dataset = np.vstack(all_data_list)
-        return self.transform(full_dataset)
+            self.nobservations += n
 
 
-class StandardScalerAdapter:
+class MinMaxRecorder:
     """
-    Adapter class to integrate OnlineStandardScaler with DSIPTS D1/D2 layers.
-
-    This class provides a consistent interface for standard scaling that works
-    with the existing DSIPTS architecture, handling both pandas DataFrames
-    and torch tensors.
+    Online min/max recorder for computing scaling parameters incrementally.
+    Useful for memory-efficient minmax scaling parameter computation.
     """
 
-    def __init__(self, columns: Optional[list] = None, epsilon: float = 1e-8):
+    def __init__(self, data=None):
         """
-        Initialize the standard scaler adapter.
+        data: ndarray, shape (nobservations, ndimensions)
+        """
+        if data is not None:
+            data = np.atleast_2d(data)
+            self.min_vals = data.min(axis=0)
+            self.max_vals = data.max(axis=0)
+            self.nobservations = data.shape[0]
+            self.ndimensions = data.shape[1]
+        else:
+            self.nobservations = 0
+
+    def update(self, data):
+        """
+        data: ndarray, shape (nobservations, ndimensions)
+        """
+        if self.nobservations == 0:
+            self.__init__(data)
+        else:
+            data = np.atleast_2d(data)
+            if data.shape[1] != self.ndimensions:
+                raise ValueError("Data dims don't match prev observations.")
+
+            self.min_vals = np.minimum(self.min_vals, data.min(axis=0))
+            self.max_vals = np.maximum(self.max_vals, data.max(axis=0))
+            self.nobservations += data.shape[0]
+
+
+class ManualScaler:
+    """
+    Manual scaling implementation with support for both memory-efficient and in-memory modes.
+    Provides standard (z-score) and minmax (0-1) scaling methods without sklearn dependencies.
+    """
+
+    def __init__(self, scaling_method="standard", scale_targets=False):
+        """
+        Initialize the manual scaler.
 
         Args:
-            columns: List of column names to scale (None means all numeric columns)
-            epsilon: Small value to prevent division by zero
+            scaling_method: Method for scaling ("standard" or "minmax")
+            scale_targets: Whether to scale target variables
         """
-        self.columns = columns
-        self.epsilon = epsilon
-        self.scaler = OnlineStandardScaler(epsilon=epsilon)
-        self.column_indices = None
-        self.is_fitted = False
+        self.scaling_method = scaling_method
+        self.scale_targets = scale_targets
+        self.is_scaler_fitted = False
+        self.scaling_params = {}
 
-    def fit_dataframe_iterator(self, df_iterator: Iterator[pd.DataFrame]):
+        # Initialize recorders for memory-efficient mode
+        self.feature_stats_recorder = None
+        self.target_stats_recorder = None
+        self.feature_minmax_recorder = None
+        self.target_minmax_recorder = None
+
+    def fit_manual_scaler(self, train_dataset, d1_dataset):
         """
-        Fit the scaler on an iterator of DataFrames.
+        Fit manual scaling parameters on training data only.
 
         Args:
-            df_iterator: Iterator yielding pandas DataFrames
+            train_dataset: Training dataset subset
         """
+        logger.info(f"Computing {self.scaling_method} scaling parameters from training data...")
 
-        def array_iterator():
-            for df in df_iterator:
-                if self.columns is None:
-                    # Use all numeric columns
-                    numeric_df = df.select_dtypes(include=[np.number])
-                    if self.column_indices is None:
-                        self.columns = numeric_df.columns.tolist()
-                        self.column_indices = [df.columns.get_loc(col) for col in self.columns]
-                    yield numeric_df.values
-                else:
-                    # Use specified columns
-                    if self.column_indices is None:
-                        self.column_indices = [df.columns.get_loc(col) for col in self.columns]
-                    yield df[self.columns].values
+        # Check if D1 dataset is memory efficient
+        is_memory_efficient = getattr(d1_dataset, "memory_efficient", False)
 
-        self.scaler.fit(array_iterator())
-        self.is_fitted = True
-        return self
+        if is_memory_efficient:
+            self._fit_manual_scaler_memory_efficient(train_dataset)
+        else:
+            self._fit_manual_scaler_in_memory(train_dataset)
 
-    def transform_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        self.is_scaler_fitted = True
+        logger.info(f"Manual {self.scaling_method} scaling parameters computed successfully")
+
+    def _fit_manual_scaler_in_memory(self, train_dataset):
         """
-        Transform a DataFrame using the fitted scaler.
+        Fit scaling parameters when data can be loaded in memory (memory_efficient=False).
+        """
+        logger.info("Using in-memory approach for scaling parameter computation")
+
+        # Collect all training data
+        all_features = []
+        all_targets = []
+
+        for i in range(len(train_dataset)):
+            sample = train_dataset[i]
+
+            # Extract features and targets
+            if "x_num_past" in sample:
+                features = sample["x_num_past"].numpy()  # [past_len, n_features]
+                all_features.append(features)
+
+            if self.scale_targets and "y" in sample:
+                targets = sample["y"].numpy()  # [future_len, n_targets]
+                all_targets.append(targets)
+
+        # Combine all data
+        if all_features:
+            combined_features = np.vstack(all_features)  # [total_samples, n_features]
+            self._compute_scaling_params(combined_features, "features")
+
+        if all_targets and self.scale_targets:
+            combined_targets = np.vstack(all_targets)  # [total_samples, n_targets]
+            self._compute_scaling_params(combined_targets, "targets")
+
+    def _fit_manual_scaler_memory_efficient(self, train_dataset):
+        """
+        Fit scaling parameters for memory-efficient mode (memory_efficient=True).
+        Uses online statistics computation.
+        """
+        logger.info("Using memory-efficient approach for scaling parameter computation")
+
+        # Initialize recorders
+        if self.scaling_method == "standard":
+            self.feature_stats_recorder = StatsRecorder()
+            if self.scale_targets:
+                self.target_stats_recorder = StatsRecorder()
+        else:  # minmax
+            self.feature_minmax_recorder = MinMaxRecorder()
+            if self.scale_targets:
+                self.target_minmax_recorder = MinMaxRecorder()
+
+        # Process training data in chunks
+        for i in range(len(train_dataset)):
+            sample = train_dataset[i]
+
+            # Update feature statistics
+            if "x_num_past" in sample:
+                features = sample["x_num_past"].numpy()  # [past_len, n_features]
+
+                if self.scaling_method == "standard":
+                    self.feature_stats_recorder.update(features)
+                else:  # minmax
+                    self.feature_minmax_recorder.update(features)
+
+            # Update target statistics
+            if self.scale_targets and "y" in sample:
+                targets = sample["y"].numpy()  # [future_len, n_targets]
+
+                if self.scaling_method == "standard":
+                    self.target_stats_recorder.update(targets)
+                else:  # minmax
+                    self.target_minmax_recorder.update(targets)
+
+        # extract final parameters
+        if self.scaling_method == "standard":
+            if self.feature_stats_recorder and self.feature_stats_recorder.nobservations > 0:
+                self.scaling_params["features"] = {
+                    "mean": self.feature_stats_recorder.mean,
+                    "std": self.feature_stats_recorder.std,
+                    "method": "standard",
+                }
+
+            if self.scale_targets and self.target_stats_recorder and self.target_stats_recorder.nobservations > 0:
+                self.scaling_params["targets"] = {
+                    "mean": self.target_stats_recorder.mean,
+                    "std": self.target_stats_recorder.std,
+                    "method": "standard",
+                }
+        else:  # minmax
+            if self.feature_minmax_recorder and self.feature_minmax_recorder.nobservations > 0:
+                range_vals = self.feature_minmax_recorder.max_vals - self.feature_minmax_recorder.min_vals
+                # Avoid division by zero
+                range_vals = np.where(range_vals == 0, 1.0, range_vals)
+
+                self.scaling_params["features"] = {
+                    "min": self.feature_minmax_recorder.min_vals,
+                    "max": self.feature_minmax_recorder.max_vals,
+                    "range": range_vals,
+                    "method": "minmax",
+                }
+
+            if self.scale_targets and self.target_minmax_recorder and self.target_minmax_recorder.nobservations > 0:
+                range_vals = self.target_minmax_recorder.max_vals - self.target_minmax_recorder.min_vals
+                # Avoid division by zero
+                range_vals = np.where(range_vals == 0, 1.0, range_vals)
+
+                self.scaling_params["targets"] = {
+                    "min": self.target_minmax_recorder.min_vals,
+                    "max": self.target_minmax_recorder.max_vals,
+                    "range": range_vals,
+                    "method": "minmax",
+                }
+
+    def _compute_scaling_params(self, data, data_type):
+        """
+        Compute scaling parameters for given data.
 
         Args:
-            df: DataFrame to transform
+            data: numpy array of shape [n_samples, n_features]
+            data_type: 'features' or 'targets'
+        """
+        if self.scaling_method == "standard":
+            mean = data.mean(axis=0)
+            std = data.std(axis=0)
+            # Avoid division by zero
+            std = np.where(std == 0, 1.0, std)
+
+            self.scaling_params[data_type] = {"mean": mean, "std": std, "method": "standard"}
+        else:  # minmax
+            min_vals = data.min(axis=0)
+            max_vals = data.max(axis=0)
+            range_vals = max_vals - min_vals
+            # Avoid division by zero
+            range_vals = np.where(range_vals == 0, 1.0, range_vals)
+
+            self.scaling_params[data_type] = {"min": min_vals, "max": max_vals, "range": range_vals, "method": "minmax"}
+
+    def apply_inverse_scaling(self, data, data_type="features"):
+        """
+        Apply inverse scaling to denormalize predictions using manual scaling parameters.
+
+        Args:
+            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
+            data_type: Type of data ('features' or 'targets')
 
         Returns:
-            Transformed DataFrame
+            Denormalized data in the same format as input
         """
-        if not self.is_fitted:
-            raise RuntimeError("Scaler not fitted. Call fit_dataframe_iterator first.")
+        if not self.is_scaler_fitted:
+            logger.warning("Scaler not fitted, cannot apply inverse scaling")
+            return data
 
-        result_df = df.copy()
-        if self.columns is not None:
-            scaled_values = self.scaler.transform(df[self.columns].values)
-            result_df[self.columns] = scaled_values
+        if data_type not in self.scaling_params:
+            logger.warning(f"No scaling parameters found for {data_type}")
+            return data
 
-        return result_df
+        params = self.scaling_params[data_type]
 
-    def inverse_transform_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        if isinstance(data, pd.DataFrame):
+            result = data.copy()
+            if params["method"] == "standard":
+                result = result * params["std"] + params["mean"]
+            else:  # minmax
+                result = result * params["range"] + params["min"]
+            return result
+
+        elif isinstance(data, np.ndarray):
+            if params["method"] == "standard":
+                return data * params["std"] + params["mean"]
+            else:  # minmax
+                return data * params["range"] + params["min"]
+
+        elif hasattr(data, "numpy"):  # PyTorch tensor
+            data_np = data.numpy()
+            if params["method"] == "standard":
+                result_np = data_np * params["std"] + params["mean"]
+            else:  # minmax
+                result_np = data_np * params["range"] + params["min"]
+            return torch.from_numpy(result_np)
+        else:
+            logger.warning("Unsupported data type for manual inverse scaling")
+            return data
+
+    def fit_scaler(self, dataset, d1_dataset):
         """
-        Inverse transform a DataFrame.
+        Fit the manual scaler on numeric features from the given dataset.
 
         Args:
-            df: Scaled DataFrame to inverse transform
-
-        Returns:
-            Original scale DataFrame
+            dataset: Dataset to fit the scaler on (typically training dataset)
+            d1_dataset: D1 dataset for memory efficiency check
         """
-        if not self.is_fitted:
-            raise RuntimeError("Scaler not fitted. Call fit_dataframe_iterator first.")
+        self.fit_manual_scaler(dataset, d1_dataset)
 
-        result_df = df.copy()
-        if self.columns is not None:
-            unscaled_values = self.scaler.inverse_transform(df[self.columns].values)
-            result_df[self.columns] = unscaled_values
-
-        return result_df
-
-    def transform_tensor(self, tensor: torch.Tensor, columns: list) -> torch.Tensor:
+    def transform_with_scaler(self, dataset):
         """
-        Transform a torch tensor using the fitted scaler.
+        Transform the numeric features in the dataset using the fitted scaler.
 
         Args:
-            tensor: Tensor to transform
-            columns: List of column names corresponding to tensor dimensions
+            dataset: Dataset to transform
 
         Returns:
-            Transformed tensor
+            Transformed dataset
         """
-        if not self.is_fitted:
-            raise RuntimeError("Scaler not fitted.")
+        if not self.is_scaler_fitted:
+            logger.warning("Scaler not fitted, returning original dataset")
+            return dataset
 
-        # Create a copy of the tensor to modify
-        result = tensor.clone()
+        logger.info(f"Transforming dataset with manual {self.scaling_method} scaling")
 
-        # Find indices of columns to scale
-        scale_indices = []
-        scale_cols = []
+        # Import here to avoid circular imports
+        from .d2_layers.encoder_decoder import EncoderDecoderSubset
 
-        for i, col in enumerate(columns):
-            if col in self.columns:
-                scale_indices.append(i)
-                # Find the index of this column in the scaler's columns
-                scaler_col_idx = self.columns.index(col)
-                scale_cols.append(scaler_col_idx)
+        # Create a new dataset with transformed features
+        class ScaledEncoderDecoderSubset(EncoderDecoderSubset):
+            def __init__(self, original_subset, scale_targets=False, scaling_params=None):
+                self.dataset = original_subset.dataset
+                self.indices = original_subset.indices
+                self.scale_targets = scale_targets
+                self.scaling_params = scaling_params or {}
 
-        if not scale_indices:
-            return tensor
+            def __getitem__(self, idx):
+                x, y = super().__getitem__(idx)
 
-        # Convert to numpy for processing
-        numpy_data = tensor.detach().numpy()
+                # Transform numeric features using manual scaling
+                if "x_num_past" in x and x["x_num_past"].shape[1] > 0:
+                    x["x_num_past"] = self._apply_manual_scaling(x["x_num_past"], "features")
 
-        # For each feature dimension that needs scaling
-        for tensor_idx, scaler_idx in zip(scale_indices, scale_cols):
-            # Extract the specific feature column
-            feature_data = numpy_data[..., tensor_idx]
+                    # Also update the backward compatibility key if present
+                    if "past_features" in x:
+                        x["past_features"] = x["x_num_past"]
 
-            # Apply standardization manually using the correct mean and std for this column
-            mean = self.scaler.mean_[scaler_idx]
-            std = self.scaler.scale_[scaler_idx]
+                # Transform targets if requested using manual scaling
+                if self.scale_targets:
+                    y = self._apply_manual_scaling(y, "targets")
 
-            # Standardize: (x - mean) / std
-            scaled_feature = (feature_data - mean) / std
+                    # Also update the target in x dictionary
+                    if "y" in x:
+                        x["y"] = y
+                    if "future_targets" in x:
+                        x["future_targets"] = y
 
-            # Update the result tensor
-            result[..., tensor_idx] = torch.from_numpy(scaled_feature)
+                return x, y
 
-        return result
+            def _apply_manual_scaling(self, data, data_type):
+                """Apply manual scaling to data."""
+                if data_type not in self.scaling_params:
+                    return data
 
-    def inverse_transform_tensor(self, tensor: torch.Tensor, columns: list) -> torch.Tensor:
-        """
-        Inverse transform a torch tensor.
+                params = self.scaling_params[data_type]
+                data_np = data.numpy()
 
-        Args:
-            tensor: Scaled tensor to inverse transform
-            columns: List of column names corresponding to tensor dimensions
+                if params["method"] == "standard":
+                    scaled_data = (data_np - params["mean"]) / params["std"]
+                else:  # minmax
+                    scaled_data = (data_np - params["min"]) / params["range"]
 
-        Returns:
-            Original scale tensor
-        """
-        if not self.is_fitted:
-            raise RuntimeError("Scaler not fitted.")
+                return torch.tensor(scaled_data, dtype=torch.float32)
 
-        # Create a copy of the tensor to modify
-        result = tensor.clone()
-
-        # Find indices of columns to unscale
-        scale_indices = []
-        scale_cols = []
-
-        for i, col in enumerate(columns):
-            if col in self.columns:
-                scale_indices.append(i)
-                # Find the index of this column in the scaler's columns
-                scaler_col_idx = self.columns.index(col)
-                scale_cols.append(scaler_col_idx)
-
-        if not scale_indices:
-            return tensor
-
-        # Convert to numpy for processing
-        numpy_data = tensor.detach().numpy()
-
-        # For each feature dimension that needs unscaling
-        for tensor_idx, scaler_idx in zip(scale_indices, scale_cols):
-            # Extract the specific feature column
-            feature_data = numpy_data[..., tensor_idx]
-
-            # Apply inverse standardization manually using the correct mean and std for this column
-            mean = self.scaler.mean_[scaler_idx]
-            std = self.scaler.scale_[scaler_idx]
-
-            # Inverse standardize: x * std + mean
-            unscaled_feature = feature_data * std + mean
-
-            # Update the result tensor
-            result[..., tensor_idx] = torch.from_numpy(unscaled_feature)
-
-        return result
-
-    def get_scaling_params(self) -> Dict[str, Dict[str, float]]:
-        """
-        Get scaling parameters in a format compatible with DSIPTS.
-
-        Returns:
-            Dictionary mapping column names to their scaling parameters
-        """
-        if not self.is_fitted:
-            return {}
-
-        params = self.scaler.get_params()
-        result = {}
-
-        for i, col in enumerate(self.columns):
-            result[col] = {
-                "mean": float(params["mean"][i]),
-                "std": float(params["std"][i]),
-                "var": float(params["var"][i]),
-                "is_constant": float(params["std"][i]) < self.epsilon,
-                "scaler_type": "standard",
-            }
-
-        return result
+        # Create and return the scaled dataset
+        return ScaledEncoderDecoderSubset(dataset, self.scale_targets, self.scaling_params)
