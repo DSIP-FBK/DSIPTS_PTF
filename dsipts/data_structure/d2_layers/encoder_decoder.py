@@ -3,28 +3,30 @@ Encoder-Decoder implementation for D2 layer.
 
 This module provides the EncoderDecoder class (formerly TSDataModule) that creates
 sliding windows and encoder-decoder structures from D1 layer data.
+
+IMPORTANT MANUAL SCALING APPROACH:
+- Data scaling is handled exclusively in the D2 layer using manual implementations
+- No sklearn dependencies - full control over scaling operations
+- Supports both memory_efficient=True/False modes from D1 layer:
+  * memory_efficient=False: In-memory scaling parameter computation
+  * memory_efficient=True: Online/incremental scaling parameter computation
+- Scaling methods supported: "standard" (z-score) and "minmax" (0-1 normalization)
+- Scalers are fitted ONLY on training data during split_data()
+- The fitted scaling parameters are applied consistently to train/validation/test splits
+- This ensures no information from validation/test sets influences training
+- Inverse scaling available for denormalizing predictions
 """
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 import pytorch_lightning as pl
 import torch
-from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-# Conditional import for MinMaxScaler
-try:
-    from sklearn.preprocessing import MinMaxScaler
-
-    MINMAX_SCALER_AVAILABLE = True
-except ImportError:
-    MINMAX_SCALER_AVAILABLE = False
-    MinMaxScaler = None
-
 from ..d1_layers.base_d1 import BaseD1Layer
+from ..scalers import ManualScaler
 
 logger = logging.getLogger(__name__)
 
@@ -357,9 +359,8 @@ class EncoderDecoder(pl.LightningDataModule):
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
         include_target_in_decoder: bool = False,
-        scaler: Optional[Any] = None,
+        scaling_method: str = "standard",
         scale_targets: bool = False,
-        apply_scaling: bool = True,
     ):
         """
         Initialize the EncoderDecoder.
@@ -379,9 +380,11 @@ class EncoderDecoder(pl.LightningDataModule):
             max_samples_per_group: Maximum samples per group
             precompute: Whether to precompute valid windows
             include_target_in_decoder: If True, include target in decoder part (for some models)
-            scaler: Optional scaler for numeric features (default: StandardScaler)
+            scaling_method: Method for manual scaling ("standard" or "minmax", default: "standard")
+                          Scaling is applied ONLY on training data to prevent data leakage
+                          Supports both memory_efficient=True/False modes from D1 layer
             scale_targets: If True, also scale target variables (default: False)
-            apply_scaling: If True, apply min-max scaling using D1 layer scaling parameters (default: True)
+                          Target scaling is also fitted only on training data
         """
         super().__init__()
 
@@ -404,41 +407,18 @@ class EncoderDecoder(pl.LightningDataModule):
         self.max_samples_per_group = max_samples_per_group
         self.precompute = precompute
         self.scale_targets = scale_targets
-        self.apply_scaling = apply_scaling
+        self.scaling_method = scaling_method
 
-        # Initialize scaler and determine scaling method
-        self.scaler = scaler if scaler is not None else StandardScaler()
+        # Initialize manual scaling approach (no sklearn dependencies)
+        self.manual_scaler = ManualScaler(scaling_method=scaling_method, scale_targets=scale_targets)
         self.is_scaler_fitted = False
-        self.use_minmax_scaler = False
-        self.use_standard_scaler = False
-        self.d1_scaling_method = getattr(d1_dataset, "scaling_method", "minmax")
 
-        # Check if MinMaxScaler is provided and available
-        if MINMAX_SCALER_AVAILABLE and isinstance(self.scaler, MinMaxScaler):
-            self.use_minmax_scaler = True
-            logger.info("Using sklearn MinMaxScaler for scaling")
-        elif apply_scaling:
-            # Determine scaling method from D1 layer
-            if self.d1_scaling_method == "standard":
-                self.use_standard_scaler = True
-                logger.info("Using standard scaling implementation from D1 layer")
-            else:
-                logger.info("Using custom min-max scaling implementation")
+        # Log scaling approach
+        logger.info(f"Using manual {scaling_method} scaling (fitted on training data only)")
+        logger.info(f"Supports memory_efficient mode from D1 layer: {getattr(d1_dataset, 'memory_efficient', False)}")
 
-        # Get scaling parameters from D1 layer
-        self.scaling_params = {}
-        if apply_scaling and hasattr(d1_dataset, "get_scaling_params"):
-            self.scaling_params = d1_dataset.get_scaling_params()
-            if self.scaling_params:
-                logger.info(f"Retrieved scaling parameters for {len(self.scaling_params)} columns from D1 layer")
-                # Log scaling method from parameters
-                first_param = next(iter(self.scaling_params.values()), {})
-                scaler_type = first_param.get("scaler_type", "minmax")
-                logger.info(f"D1 layer scaling method: {scaler_type}")
-            else:
-                logger.info("No scaling parameters found in D1 layer")
-        elif apply_scaling:
-            logger.warning("apply_scaling=True but D1 dataset does not support scaling parameters")
+        if scale_targets:
+            logger.info("Target scaling enabled (fitted on training data only)")
 
         # Extract column information from D1 dataset
         self.known_cols = d1_dataset.known_cols
@@ -479,20 +459,8 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info("Building valid windows from D1 dataset...")
         self._build_valid_windows()
 
-        # Apply scaling to D1 dataset if requested
-        if self.apply_scaling:
-            if self.use_minmax_scaler:
-                logger.info("Fitting and applying sklearn MinMaxScaler to D1 dataset...")
-                self._fit_and_apply_sklearn_scaler()
-            elif self.use_standard_scaler:
-                logger.info("Using standard scaling from D1 dataset (already applied)...")
-                # Standard scaling is already applied in D1 layer, no additional action needed
-            elif self.scaling_params:
-                scaling_method = self.d1_scaling_method
-                logger.info(f"Applying {scaling_method} scaling to D1 dataset...")
-                self._apply_scaling_to_d1_dataset()
-            else:
-                logger.warning("Scaling requested but no scaling method available")
+        # Note: Scaling is now handled during split_data() to prevent data leakage
+        # The scaler will be fitted only on training data after dataset splitting
 
         logger.info(f"EncoderDecoder initialized with {len(self.valid_windows)} windows")
 
@@ -534,312 +502,40 @@ class EncoderDecoder(pl.LightningDataModule):
                 self.val_dataset = EncoderDecoderSubset(self.dataset, [])
                 self.test_dataset = EncoderDecoderSubset(self.dataset, [])
 
-    def _apply_scaling_to_d1_dataset(self):
+    def fit_scaler(self, dataset):
         """
-        Apply min-max scaling to the D1 dataset using precomputed scaling parameters.
-
-        This method modifies the D1 dataset in-place by applying min-max scaling
-        to numerical features based on global min/max values computed during D1 initialization.
-        """
-        if not self.scaling_params:
-            logger.warning("No scaling parameters available for scaling")
-            return
-
-        logger.info(f"Applying min-max scaling to {len(self.scaling_params)} numerical columns")
-
-        # Get feature column information from D1 metadata
-        d1_metadata = getattr(self.d1_dataset, "metadata", {})
-        feature_cols = d1_metadata.get("feature_cols", [])
-
-        if not feature_cols:
-            logger.warning("No feature columns found in D1 metadata")
-            return
-
-        # Apply scaling to each group in the D1 dataset
-        total_groups = len(self.d1_dataset)
-        scaled_groups = 0
-
-        for group_idx in range(total_groups):
-            try:
-                # Get group data
-                if hasattr(self.d1_dataset, "cached_data") and self.d1_dataset.cached_data:
-                    # Use cached data if available
-                    file_group_key = self.d1_dataset._group_ids[group_idx]
-                    if file_group_key in self.d1_dataset.cached_data:
-                        group_data = self.d1_dataset.cached_data[file_group_key]
-
-                        # Apply scaling to numerical columns
-                        scaled_data = self._apply_scaling_to_dataframe(group_data, feature_cols)
-
-                        # Update cached data
-                        self.d1_dataset.cached_data[file_group_key] = scaled_data
-                        scaled_groups += 1
-                else:
-                    # For memory-efficient mode, we'll apply scaling on-the-fly during __getitem__
-                    # This is handled in the _apply_scaling_to_tensor method
-                    pass
-
-            except Exception as e:
-                logger.warning(f"Failed to apply scaling to group {group_idx}: {e}")
-
-        if scaled_groups > 0:
-            logger.info(f"Applied scaling to {scaled_groups} cached groups")
-        else:
-            logger.info("Scaling will be applied on-the-fly during data loading (memory-efficient mode)")
-
-    def _apply_scaling_to_dataframe(self, df, feature_cols):
-        """
-        Apply min-max scaling to a DataFrame.
+        Fit the manual scaler on numeric features from the given dataset.
 
         Args:
-            df: DataFrame to scale
-            feature_cols: List of feature column names
-
-        Returns:
-            Scaled DataFrame
+            dataset: Dataset to fit the scaler on (typically training dataset)
         """
-        scaled_df = df.copy()
+        self.manual_scaler.fit_scaler(dataset, self.d1_dataset)
+        self.is_scaler_fitted = self.manual_scaler.is_scaler_fitted
 
-        for col in feature_cols:
-            if col in self.scaling_params and col in scaled_df.columns:
-                params = self.scaling_params[col]
-
-                if not params["is_constant"]:
-                    # Apply min-max scaling: (x - min) / (max - min)
-                    scaled_df[col] = (scaled_df[col] - params["min"]) / params["range"]
-                else:
-                    # For constant columns, set to 0
-                    scaled_df[col] = 0.0
-
-                logger.debug(f"Applied scaling to column '{col}'")
-
-        return scaled_df
-
-    def _apply_scaling_to_tensor(self, tensor, feature_cols):
+    def transform_with_scaler(self, dataset):
         """
-        Apply min-max scaling to a tensor.
+        Transform the numeric features in the dataset using the fitted scaler.
 
         Args:
-            tensor: PyTorch tensor to scale [seq_len, n_features]
-            feature_cols: List of feature column names
+            dataset: Dataset to transform
 
         Returns:
-            Scaled tensor
+            Transformed dataset
         """
-        if not self.scaling_params or tensor.numel() == 0:
-            return tensor
+        return self.manual_scaler.transform_with_scaler(dataset)
 
-        scaled_tensor = tensor.clone()
-
-        for i, col in enumerate(feature_cols):
-            if col in self.scaling_params and i < tensor.shape[-1]:
-                params = self.scaling_params[col]
-
-                if not params["is_constant"]:
-                    # Apply min-max scaling: (x - min) / (max - min)
-                    scaled_tensor[..., i] = (tensor[..., i] - params["min"]) / params["range"]
-                else:
-                    # For constant columns, set to 0
-                    scaled_tensor[..., i] = 0.0
-
-        return scaled_tensor
-
-    def get_scaling_params(self):
+    def apply_inverse_scaling(self, data, data_type="features"):
         """
-        Get the scaling parameters used by this D2 layer.
-
-        Returns:
-            Dictionary containing scaling parameters for each numerical column
-        """
-        return self.scaling_params
-
-    def apply_inverse_scaling(self, data, columns=None):
-        """
-        Apply inverse scaling to denormalize predictions (supports both minmax and standard scaling).
+        Apply inverse scaling to denormalize predictions using manual scaling parameters.
 
         Args:
             data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
-            columns: List of column names (required if data is numpy array or tensor)
+            data_type: Type of data ('features' or 'targets')
 
         Returns:
             Denormalized data in the same format as input
         """
-        if self.use_minmax_scaler:
-            return self.apply_inverse_sklearn_scaling(data, columns)
-        elif self.use_standard_scaler or self.d1_scaling_method == "standard":
-            # Use D1 layer's inverse scaling (handles both minmax and standard)
-            if hasattr(self.d1_dataset, "apply_inverse_scaling"):
-                return self.d1_dataset.apply_inverse_scaling(data, columns)
-            else:
-                logger.warning("D1 dataset does not support inverse scaling")
-                return data
-        elif hasattr(self.d1_dataset, "apply_inverse_scaling"):
-            return self.d1_dataset.apply_inverse_scaling(data, columns)
-        else:
-            logger.warning("No inverse scaling method available")
-            return data
-
-    def _fit_and_apply_sklearn_scaler(self):
-        """
-        Fit and apply sklearn MinMaxScaler to the D1 dataset.
-
-        This method collects all numerical data, fits the scaler, and applies scaling.
-        """
-        if not self.use_minmax_scaler:
-            logger.warning("sklearn MinMaxScaler not available or not selected")
-            return
-
-        logger.info("Fitting sklearn MinMaxScaler on D1 dataset...")
-
-        # Get feature column information from D1 metadata
-        d1_metadata = getattr(self.d1_dataset, "metadata", {})
-        feature_cols = d1_metadata.get("feature_cols", [])
-        num_cols = getattr(self.d1_dataset, "num_cols", [])
-
-        # Filter to only numerical columns (exclude categorical and time columns)
-        scalable_cols = []
-        time_col = getattr(self.d1_dataset, "_time_col", "time")
-        group_cols = getattr(self.d1_dataset, "group_cols", [])
-
-        for col in num_cols:
-            if col != time_col and col not in group_cols:
-                scalable_cols.append(col)
-
-        if not scalable_cols:
-            logger.warning("No scalable numerical columns found for sklearn MinMaxScaler")
-            return
-
-        logger.info(f"Collecting data for {len(scalable_cols)} columns: {scalable_cols}")
-
-        # Collect all numerical data for fitting
-        all_numerical_data = []
-        total_groups = len(self.d1_dataset)
-
-        for group_idx in range(total_groups):
-            try:
-                group_sample = self.d1_dataset[group_idx]
-                if "x" in group_sample:
-                    # Extract numerical features based on feature column indices
-                    x_data = group_sample["x"]  # [seq_len, n_features]
-
-                    # Get indices of scalable columns in feature_cols
-                    scalable_indices = []
-                    for col in scalable_cols:
-                        if col in feature_cols:
-                            scalable_indices.append(feature_cols.index(col))
-
-                    if scalable_indices and x_data.shape[1] > max(scalable_indices):
-                        # Extract only the scalable numerical columns
-                        numerical_data = x_data[:, scalable_indices].numpy()
-                        all_numerical_data.append(numerical_data)
-
-            except Exception as e:
-                logger.warning(f"Failed to collect data from group {group_idx}: {e}")
-
-        if not all_numerical_data:
-            logger.warning("No numerical data collected for sklearn MinMaxScaler")
-            return
-
-        # Combine all data and fit scaler
-        combined_data = np.vstack(all_numerical_data)
-        logger.info(f"Fitting MinMaxScaler on {combined_data.shape[0]} samples with {combined_data.shape[1]} features")
-
-        self.scaler.fit(combined_data)
-        self.is_scaler_fitted = True
-        self.scalable_cols = scalable_cols
-        self.scalable_indices = scalable_indices
-
-        logger.info("sklearn MinMaxScaler fitted successfully")
-
-        # Apply scaling to cached data if available
-        if hasattr(self.d1_dataset, "cached_data") and self.d1_dataset.cached_data:
-            self._apply_sklearn_scaling_to_cached_data()
-
-    def _apply_sklearn_scaling_to_cached_data(self):
-        """
-        Apply sklearn MinMaxScaler to cached data in D1 dataset.
-        """
-        if not self.is_scaler_fitted:
-            logger.warning("Scaler not fitted, cannot apply scaling")
-            return
-
-        logger.info("Applying sklearn MinMaxScaler to cached data...")
-        scaled_groups = 0
-
-        for file_group_key, group_data in self.d1_dataset.cached_data.items():
-            try:
-                # Apply scaling to DataFrame
-                scaled_data = group_data.copy()
-
-                for i, col in enumerate(self.scalable_cols):
-                    if col in scaled_data.columns:
-                        # Transform single column
-                        col_data = scaled_data[[col]].values
-                        scaled_col_data = self.scaler.transform(col_data[:, [i]])
-                        scaled_data[col] = scaled_col_data.flatten()
-
-                self.d1_dataset.cached_data[file_group_key] = scaled_data
-                scaled_groups += 1
-
-            except Exception as e:
-                logger.warning(f"Failed to apply sklearn scaling to group {file_group_key}: {e}")
-
-        logger.info(f"Applied sklearn MinMaxScaler to {scaled_groups} cached groups")
-
-    def apply_inverse_sklearn_scaling(self, data, columns=None):
-        """
-        Apply inverse sklearn MinMaxScaler to denormalize predictions.
-
-        Args:
-            data: Data to denormalize (numpy array, pandas DataFrame, or torch tensor)
-            columns: List of column names (required if data is numpy array or tensor)
-
-        Returns:
-            Denormalized data in the same format as input
-        """
-        if not self.is_scaler_fitted:
-            logger.warning("Scaler not fitted, cannot apply inverse scaling")
-            return data
-
-        if isinstance(data, pd.DataFrame):
-            result = data.copy()
-            for i, col in enumerate(self.scalable_cols):
-                if col in data.columns:
-                    col_data = data[[col]].values
-                    unscaled_col_data = self.scaler.inverse_transform(col_data[:, [i]])
-                    result[col] = unscaled_col_data.flatten()
-            return result
-
-        elif isinstance(data, np.ndarray) and columns is not None:
-            result = data.copy()
-            for i, col in enumerate(columns):
-                if col in self.scalable_cols and i < data.shape[1]:
-                    scaler_idx = self.scalable_cols.index(col)
-                    col_data = data[:, [i]]
-                    # Create dummy array with correct shape for inverse_transform
-                    dummy_data = np.zeros((col_data.shape[0], len(self.scalable_cols)))
-                    dummy_data[:, scaler_idx] = col_data.flatten()
-                    unscaled_dummy = self.scaler.inverse_transform(dummy_data)
-                    result[:, i] = unscaled_dummy[:, scaler_idx]
-            return result
-
-        elif hasattr(data, "clone"):  # PyTorch tensor
-            result = data.clone()
-            if columns is not None:
-                for i, col in enumerate(columns):
-                    if col in self.scalable_cols and i < data.shape[-1]:
-                        scaler_idx = self.scalable_cols.index(col)
-                        col_data = data[..., i].numpy()
-                        # Create dummy array for inverse_transform
-                        dummy_data = np.zeros((col_data.shape[0], len(self.scalable_cols)))
-                        dummy_data[:, scaler_idx] = col_data.flatten()
-                        unscaled_dummy = self.scaler.inverse_transform(dummy_data)
-                        result[..., i] = torch.from_numpy(unscaled_dummy[:, scaler_idx])
-            return result
-
-        else:
-            logger.warning("Unsupported data type for sklearn inverse scaling")
-            return data
+        return self.manual_scaler.apply_inverse_scaling(data, data_type)
 
     def _build_valid_windows(self):
         """
@@ -998,126 +694,6 @@ class EncoderDecoder(pl.LightningDataModule):
 
         else:
             raise ValueError(f"Unknown split method: {self.split_method}")
-
-    def fit_scaler(self, dataset: EncoderDecoderSubset):
-        """
-        Fit the scaler on numeric features from the given dataset.
-
-        Args:
-            dataset: Dataset to fit the scaler on (typically training dataset)
-        """
-        if not hasattr(self, "scaler") or self.scaler is None:
-            logger.info("No scaler provided, skipping scaler fitting")
-            return
-
-        logger.info(f"Fitting {type(self.scaler).__name__} on training data")
-
-        # Collect all numeric features from the dataset
-        all_numeric_features = []
-
-        for idx in range(len(dataset)):
-            x, _ = dataset[idx]
-            if "x_num_past" in x and x["x_num_past"].shape[1] > 0:
-                # Extract numeric features and reshape to 2D array
-                numeric_features = x["x_num_past"].numpy().reshape(-1, x["x_num_past"].shape[1])
-                all_numeric_features.append(numeric_features)
-
-        if not all_numeric_features:
-            logger.warning("No numeric features found in dataset, cannot fit scaler")
-            return
-
-        # Concatenate all features and fit the scaler
-        all_features = np.vstack(all_numeric_features)
-        logger.info(f"Fitting scaler on {all_features.shape[0]} samples" f" with {all_features.shape[1]} features")
-
-        self.scaler.fit(all_features)
-        self.is_scaler_fitted = True
-        logger.info("Scaler fitted successfully")
-
-        # If scale_targets is True, fit another scaler for target variables
-        if self.scale_targets:
-            logger.info("Fitting target scaler")
-            self.target_scaler = StandardScaler()
-
-            all_targets = []
-            for idx in range(len(dataset)):
-                x, y = dataset[idx]
-                if isinstance(y, torch.Tensor) and y.numel() > 0:
-                    targets = y.numpy().reshape(-1, y.shape[-1])
-                    all_targets.append(targets)
-
-            if all_targets:
-                all_targets = np.vstack(all_targets)
-                logger.info(f"Fitting target scaler on {all_targets.shape[0]}" f" samples with {all_targets.shape[1]} features")
-                self.target_scaler.fit(all_targets)
-                logger.info("Target scaler fitted successfully")
-            else:
-                logger.warning("No targets found in dataset, cannot fit target scaler")
-                self.scale_targets = False
-
-    def transform_with_scaler(self, dataset: EncoderDecoderSubset) -> EncoderDecoderSubset:
-        """
-        Transform the numeric features in the dataset using the fitted scaler.
-
-        Args:
-            dataset: Dataset to transform
-
-        Returns:
-            Transformed dataset
-        """
-        if not self.is_scaler_fitted:
-            logger.warning("Scaler not fitted, returning original dataset")
-            return dataset
-
-        logger.info(f"Transforming dataset with {type(self.scaler).__name__}")
-
-        # Create a new dataset with transformed features
-        class ScaledEncoderDecoderSubset(EncoderDecoderSubset):
-            def __init__(self, original_subset, scaler, target_scaler=None, scale_targets=False):
-                self.dataset = original_subset.dataset
-                self.indices = original_subset.indices
-                self.scaler = scaler
-                self.target_scaler = target_scaler
-                self.scale_targets = scale_targets
-
-            def __getitem__(self, idx):
-                x, y = super().__getitem__(idx)
-
-                # Transform numeric features
-                if "x_num_past" in x and x["x_num_past"].shape[1] > 0:
-                    # Get original shape for reshaping back after transformation
-                    orig_shape = x["x_num_past"].shape
-
-                    # Reshape to 2D for transformation
-                    features = x["x_num_past"].numpy().reshape(-1, orig_shape[1])
-
-                    # Transform and reshape back
-                    transformed = self.scaler.transform(features)
-                    x["x_num_past"] = torch.tensor(transformed.reshape(orig_shape), dtype=torch.float32)
-
-                    # Also update the backward compatibility key if present
-                    if "past_features" in x:
-                        x["past_features"] = x["x_num_past"]
-
-                # Transform targets if requested
-                if self.scale_targets and self.target_scaler is not None:
-                    if isinstance(y, torch.Tensor) and y.numel() > 0:
-                        orig_shape = y.shape
-                        targets = y.numpy().reshape(-1, orig_shape[-1])
-                        transformed = self.target_scaler.transform(targets)
-                        y = torch.tensor(transformed.reshape(orig_shape), dtype=torch.float32)
-
-                        # Also update the target in x dictionary
-                        if "y" in x:
-                            x["y"] = y
-                        if "future_targets" in x:
-                            x["future_targets"] = y
-
-                return x, y
-
-        # Create and return the scaled dataset
-        target_scaler = getattr(self, "target_scaler", None) if self.scale_targets else None
-        return ScaledEncoderDecoderSubset(dataset, self.scaler, target_scaler, self.scale_targets)
 
     def split_data(
         self,
