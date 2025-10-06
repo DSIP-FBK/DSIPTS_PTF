@@ -1,7 +1,12 @@
 """Utility functions for D2 layer implementations."""
 
+import logging
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def custom_collate_fn(batch):
@@ -69,3 +74,138 @@ def custom_collate_fn(batch):
                     result[key] = torch.stack(padded_tensors)
 
     return result
+
+
+def is_valid_window(past_indices: List[int], future_indices: List[int], past_len: int, future_len: int) -> bool:
+    """
+    Check if a window is valid (has sufficient data).
+
+    Args:
+        past_indices: Indices for past data
+        future_indices: Indices for future data
+        past_len: Required past length
+        future_len: Required future length
+
+    Returns:
+        True if window is valid
+    """
+    return len(past_indices) == past_len and len(future_indices) == future_len
+
+
+def build_valid_windows(
+    d1_dataset, past_len: int, future_len: int, step_size: int, max_samples_per_group: int = None
+) -> List[Dict[str, Any]]:
+    """
+    Build valid sliding windows from the D1 dataset.
+
+    Args:
+        d1_dataset: D1 layer dataset
+        past_len: Length of past sequence
+        future_len: Length of future sequence
+        step_size: Step size for sliding window
+        max_samples_per_group: Maximum samples per group
+
+    Returns:
+        List of valid window dictionaries
+    """
+    valid_windows = []
+    total_groups = len(d1_dataset)
+    windows_per_group = {}
+    insufficient_groups = []
+
+    for group_idx in range(total_groups):
+        group_sample = d1_dataset[group_idx]
+        group_id = group_sample.get("group_id", group_idx)
+        seq_len = group_sample.get("seq_len", 0)
+
+        # Create sliding windows within this group's sequence
+        max_windows = seq_len - past_len - future_len + 1
+
+        if max_windows > 0:
+            group_windows = 0
+            for i in range(0, max_windows, step_size):
+                window = {
+                    "group_idx": group_idx,
+                    "group_id": group_id,
+                    "start_idx": i,
+                    "past_len": past_len,
+                    "future_len": future_len,
+                }
+                valid_windows.append(window)
+                group_windows += 1
+
+                # Limit samples per group if specified
+                if (
+                    max_samples_per_group
+                    and len([w for w in valid_windows if w["group_id"] == group_id]) >= max_samples_per_group
+                ):
+                    break
+
+            windows_per_group[group_id] = group_windows
+        else:
+            insufficient_groups.append(group_id)
+
+    logger.info(f"Created {len(valid_windows)} windows from {len(windows_per_group)} groups")
+    if insufficient_groups:
+        logger.debug(f"Skipped {len(insufficient_groups)} groups with insufficient data")
+
+    return valid_windows
+
+
+def create_temporal_splits(
+    valid_windows: List[Dict], train_ratio: float, val_ratio: float, test_ratio: float
+) -> Tuple[List[int], List[int], List[int]]:
+    """
+    Create temporal train/val/test splits.
+
+    Args:
+        valid_windows: List of valid windows
+        train_ratio: Training data ratio
+        val_ratio: Validation data ratio
+        test_ratio: Test data ratio
+
+    Returns:
+        Tuple of (train_indices, val_indices, test_indices)
+    """
+    n_samples = len(valid_windows)
+    train_size = int(n_samples * train_ratio)
+    val_size = int(n_samples * val_ratio)
+
+    train_indices = list(range(train_size))
+    val_indices = list(range(train_size, train_size + val_size))
+    test_indices = list(range(train_size + val_size, n_samples))
+
+    return train_indices, val_indices, test_indices
+
+
+def create_random_splits(
+    valid_windows: List[Dict], train_ratio: float, val_ratio: float, test_ratio: float, seed: int = None
+) -> Tuple[List[int], List[int], List[int]]:
+    """
+    Create random train/val/test splits.
+
+    Args:
+        valid_windows: List of valid windows
+        train_ratio: Training data ratio
+        val_ratio: Validation data ratio
+        test_ratio: Test data ratio
+        seed: Random seed for reproducibility
+
+    Returns:
+        Tuple of (train_indices, val_indices, test_indices)
+    """
+    n_samples = len(valid_windows)
+    indices = list(range(n_samples))
+
+    if seed is not None:
+        np.random.seed(seed)
+    np.random.shuffle(indices)
+
+    train_size = int(n_samples * train_ratio)
+    val_size = int(n_samples * val_ratio)
+
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size : train_size + val_size]
+    test_indices = indices[train_size + val_size :]
+
+    return train_indices, val_indices, test_indices

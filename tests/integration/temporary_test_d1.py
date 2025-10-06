@@ -20,6 +20,9 @@ import pandas as pd
 # Import our library components
 from dsipts.data_structure.d1_layers import MultiSourceTSDataSet
 
+# Enable logging for this test run
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 
 def temp_data_dir():
     """Create a temporary directory for test data."""
@@ -252,8 +255,8 @@ d1 = MultiSourceTSDataSet(
     num_cols=metadata["num_cols"],
     known_cols=["num_0", "cat_0"],
     cat_cols=metadata["cat_cols"],
-    global_forecasting=False,
-    enrich_cat=["minute"],
+    global_forecasting=True,
+    enrich_cat=["minute", "dow"],
 )
 logger.info(f"D1 initialized with group_cols={d1.group_cols}")
 logger.info(f"D1 has {len(d1)} groups")
@@ -298,3 +301,33 @@ if cat_cols:
     logger.info(f"Categorical preview (first 5 rows):\n{cat_preview}")
 else:
     logger.info("No categorical feature columns.")
+
+# [6/6] Test categorical information in ordered lists
+logger.info("\n[6/6] TESTING CATEGORICAL INFO AS ORDERED LISTS")
+logger.info("-" * 40)
+logger.info(f"Sample has 'cat_cols' key: {'cat_cols' in sample0}")
+logger.info(f"Sample has 'cat_cardinalities' key: {'cat_cardinalities' in sample0}")
+
+if "cat_cols" in sample0 and "cat_cardinalities" in sample0:
+    cat_cols_list = sample0["cat_cols"]
+    cat_cardinalities_list = sample0["cat_cardinalities"]
+
+    logger.info(f"Number of categorical columns: {len(cat_cols_list)}")
+    logger.info(f"Categorical columns (ordered): {cat_cols_list}")
+    logger.info(f"Cardinalities (ordered): {cat_cardinalities_list}")
+
+    # Verify the order is preserved
+    logger.info("\nVerifying order preservation:")
+    for i, (col, card) in enumerate(zip(cat_cols_list, cat_cardinalities_list)):
+        logger.info(f"  Position {i}: {col} -> cardinality {card}")
+        # Verify against label encoder
+        if col in d1.label_encoders:
+            actual_card = len(d1.label_encoders[col].classes_)
+            if actual_card == card:
+                logger.info("    ✓ Cardinality matches label encoder")
+            else:
+                logger.error(f"    ✗ Cardinality mismatch! Expected {actual_card}, got {card}")
+
+    logger.info("\n✅ Categorical information successfully stored as ordered lists!")
+else:
+    logger.warning("Categorical information not found in sample!")

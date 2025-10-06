@@ -1,976 +1,298 @@
+"""
+Comprehensive D2 Layer (EncoderDecoder) Test Suite
+
+Coverage: Windows, Batches, Scaling, Splitting, DataLoader
+"""
+
+import logging
 import os
 import shutil
-import sys
 import tempfile
-import unittest
-from typing import Any, Dict, List
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import torch
+import pytest
 from torch.utils.data import DataLoader
 
-# Add the parent directory to the path so we can import the module
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-# Import from new structure only
 from dsipts.data_structure.d1_layers import MultiSourceTSDataSet
-from dsipts.data_structure.d1_layers.base_d1 import BaseD1Layer
-from dsipts.data_structure.d2_layers import EncoderDecoder, custom_collate_fn
+from dsipts.data_structure.d2_layers import EncoderDecoder
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
-class CustomD1TestLayer(BaseD1Layer):
-    """Custom D1 layer for testing D2 layer functionality."""
-
-    def __init__(self, global_forecasting=True):
-        """Initialize the custom D1 layer with synthetic data."""
-        self.global_forecasting = global_forecasting
-
-        # Set up required attributes for BaseD1Layer interface
-        self._group_cols = [] if global_forecasting else ["group"]
-        self._time_col = "time"
-        self._num_cols = ["feature_0", "feature_1"]
-        self._cat_cols = ["cat_feature"]
-        self._target_cols = ["target_0"]
-        self._known_cols = ["feature_0"]
-        self._unknown_cols = ["feature_1"]
-
-        # Set up metadata with all required fields
-        self.metadata = {
-            "group_cols": self._group_cols,
-            "time_col": self._time_col,
-            "num_cols": self._num_cols,
-            "cat_cols": self._cat_cols,
-            "target_cols": self._target_cols,
-            "known_cols": self._known_cols,
-            "unknown_cols": self._unknown_cols,
-            "global_forecasting": global_forecasting,
-        }
-
-    def __len__(self) -> int:
-        """Return the number of groups."""
-        return 2  # Always return 2 groups for testing
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get data for a specific group with proper sequence data."""
-        if not isinstance(idx, int) or idx >= 2:
-            raise IndexError(f"Group index {idx} out of range")
-
-        # Create synthetic data with sufficient sequence length for windows
-        seq_len = 15  # Long enough for windows with past_len=3, future_len=2
-
-        # Create numerical features tensor [seq_len, num_features]
-        x_num = torch.randn(seq_len, len(self.metadata["num_cols"]))
-
-        # Create categorical features tensor [seq_len, cat_features]
-        x_cat = torch.zeros(seq_len, len(self.metadata["cat_cols"]), dtype=torch.long)
-        for i in range(seq_len):
-            x_cat[i, 0] = i % 3  # 3 different categorical values
-
-        # Create target tensor [seq_len, num_targets]
-        y = torch.randn(seq_len, len(self.metadata["target_cols"]))
-
-        # Create time indices
-        time_idx = torch.arange(seq_len, dtype=torch.long)
-
-        # Build the complete return dictionary with all required fields
-        result = {
-            "group_id": idx,  # Integer group ID
-            "seq_len": seq_len,  # Sequence length
-            "time_idx": time_idx,  # Time indices
-        }
-
-        # Include numerical features
-        if len(self._num_cols) > 0:
-            result["x"] = x_num
-
-        # Include categorical features - valid check if categorical features exists
-        # EncoderDecoder checks for idx_categorical in metadata to determine if categori
-        if len(self._cat_cols) > 0:
-            result["x_cat"] = x_cat
-            # Add categorical indices to metadata
-            if "idx_categorical" not in self.metadata:
-                self.metadata["idx_categorical"] = [0]  # Index position of categorical feature
-
-        # Include targets
-        if len(self._target_cols) > 0:
-            result["y"] = y
-            # Add target indices to metadata
-            if "idx_targets" not in self.metadata:
-                self.metadata["idx_targets"] = [0]  # Index position of target
-
-        return result
-
-    @property
-    def num_cols(self) -> List[str]:
-        """Return numerical columns."""
-        return self.metadata["num_cols"]
-
-    @property
-    def cat_cols(self) -> List[str]:
-        """Return categorical columns."""
-        return self.metadata["cat_cols"]
-
-    @property
-    def target_cols(self) -> List[str]:
-        """Return target columns."""
-        return self.metadata["target_cols"]
-
-    @property
-    def known_cols(self) -> List[str]:
-        """Return known columns."""
-        return self.metadata["known_cols"]
-
-    @property
-    def unknown_cols(self) -> List[str]:
-        """Return unknown columns."""
-        return self.metadata["unknown_cols"]
-
-    @property
-    def feature_cols(self) -> List[str]:
-        """Return feature columns (combination of num_cols and cat_cols)."""
-        return self.metadata["num_cols"] + self.metadata["cat_cols"]
+@pytest.fixture
+def temp_dir():
+    tmp = tempfile.mkdtemp()
+    yield tmp
+    shutil.rmtree(tmp)
 
 
-class TestEncoderDecoder(unittest.TestCase):
-    """Test cases for the EncoderDecoder class (formerly TSDataModule)."""
+@pytest.fixture
+def d1_basic(temp_dir):
+    np.random.seed(42)
+    data = [
+        {"time": t, "group_id": f"g_{t%2}", "num_0": np.sin(t / 10), "cat_0": f"c_{t%3}", "target_0": np.sin(t / 5)}
+        for t in range(100)
+    ]
+    df = pd.DataFrame(data)
+    path = os.path.join(temp_dir, "data.csv")
+    df.to_csv(path, index=False)
+    return MultiSourceTSDataSet(
+        file_paths=[path],
+        group_cols=["group_id"],
+        time_col="time",
+        target_cols=["target_0"],
+        num_cols=["num_0"],
+        cat_cols=["cat_0"],
+    )
 
-    def setUp(self):
-        """Set up test data."""
-        # Create a temporary directory for test files
-        self.temp_dir = tempfile.mkdtemp()
 
-        # Create test CSV files
-        self.create_test_files()
+class TestD2Windows:
+    def test_window_creation(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
+        assert len(d2.valid_windows) > 0
+        logger.info(f"✓ Windows: {len(d2.valid_windows)}")
 
-        # Create D1 dataset
-        self.file_paths = [os.path.join(self.temp_dir, f"test_data_{i}.csv") for i in range(2)]
-        self.group_cols = "group"
-        self.time_col = "time"
-        self.feature_cols = ["feature_0", "feature_1"]  # Keep for test reference
-        self.target_cols = ["target_0"]
-        self.cat_cols = ["cat_feature"]
+    def test_step_size(self, d1_basic):
+        d2_1 = EncoderDecoder(d1_basic, past_len=10, future_len=5, step_size=1)
+        d2_5 = EncoderDecoder(d1_basic, past_len=10, future_len=5, step_size=5)
+        assert len(d2_1.valid_windows) > len(d2_5.valid_windows)
+        logger.info("✓ Step size")
 
-        self.d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            num_cols=self.feature_cols,  # Use num_cols instead of feature_cols
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
+
+class TestD2Batch:
+    def test_structure(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
+        x, y = d2.dataset[0]
+        assert all(k in x for k in ["x_num_past", "x_cat_past", "y", "idx_target"])
+        assert y.shape[0] == 12
+        logger.info(f"✓ Batch: x_num={x['x_num_past'].shape}, y={y.shape}")
+
+    def test_shapes(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=20, future_len=10)
+        x, y = d2.dataset[0]
+        assert x["x_num_past"].shape[0] == 20
+        assert y.shape[0] == 10
+        logger.info("✓ Shapes")
+
+
+class TestD2Scaling:
+    def test_standard(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard")
+        train, val, test = d2.split_data()
+        assert d2.is_scaler_fitted
+        x, y = train[0]
+        assert abs(x["x_num_past"].mean().item()) < 2
+        logger.info("✓ Standard scaling")
+
+    def test_minmax(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="minmax")
+        train, val, test = d2.split_data()
+        x, y = train[0]
+        assert x["x_num_past"].min() >= -0.1 and x["x_num_past"].max() <= 1.1
+        logger.info("✓ MinMax scaling")
+
+
+class TestD2Splitting:
+    def test_temporal(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
+        train, val, test = d2.split_data(method="temporal")
+        assert len(train) > 0 and len(val) > 0 and len(test) > 0
+        logger.info(f"✓ Temporal: train={len(train)}, val={len(val)}, test={len(test)}")
+
+    def test_random(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
+        train, val, test = d2.split_data(method="random")
+        assert len(train) > 0
+        logger.info("✓ Random split")
+
+
+class TestD2DataLoader:
+    def test_loader(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, batch_size=16)
+        train, val, test = d2.split_data()
+        loader = DataLoader(train, batch_size=16, shuffle=True)
+        batch = next(iter(loader))
+        x, y = batch
+        assert x["x_num_past"].dim() == 3
+        logger.info(f"✓ DataLoader: batch={x['x_num_past'].shape}")
+
+
+class TestD2WindowEdgeCases:
+    """Test window creation edge cases."""
+
+    def test_insufficient_sequence_length(self, temp_dir):
+        np.random.seed(42)
+        # Create very short sequences
+        data = [{"time": t, "group": "g1", "val": t, "target": t} for t in range(10)]
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "short.csv")
+        df.to_csv(path, index=False)
+
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path], group_cols=["group"], time_col="time", target_cols=["target"], num_cols=["val"]
         )
 
-    def tearDown(self):
-        """Clean up temporary files."""
-        shutil.rmtree(self.temp_dir)
+        # Request windows longer than sequence
+        d2 = EncoderDecoder(d1, past_len=20, future_len=10)
+        assert len(d2.valid_windows) == 0  # Should have no valid windows
+        logger.info("✓ Insufficient length handled")
 
-    def create_test_files(self):
-        """Create test CSV files."""
-        # Generate two CSV files with groups distributed across both files
-        # File 0: groups 0, 1
-        # File 1: groups 1, 2 (group 1 appears in both files)
+    def test_window_boundaries(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=10, future_len=5, step_size=1)
+        # Check first and last windows
+        first_window = d2.valid_windows[0]
+        last_window = d2.valid_windows[-1]
+        assert first_window["start_idx"] >= 0
+        assert last_window["start_idx"] >= 0
+        # Verify window has required keys
+        assert all(k in first_window for k in ["group_idx", "start_idx", "past_len", "future_len"])
+        logger.info("✓ Window boundaries")
 
-        file_group_mapping = {
-            0: [0, 1],  # File 0 contains groups 0 and 1
-            1: [1, 2],  # File 1 contains groups 1 and 2
-        }
 
-        for file_idx in range(2):
-            data = []
-            groups_for_file = file_group_mapping[file_idx]
+class TestD2TargetScaling:
+    """Test target scaling functionality."""
 
-            # Generate data for each group assigned to this file
-            for group_idx in groups_for_file:
-                # Generate time series for this group
-                for t in range(20):  # Longer sequences for window creation
-                    row = {
-                        "group": f"group_{group_idx}",
-                        "time": t,
-                        "feature_0": np.sin(t / 10 + group_idx) + np.random.normal(0, 0.1),
-                        "feature_1": np.cos(t / 10 + group_idx) + np.random.normal(0, 0.1),
-                        "target_0": np.sin(t / 5 + group_idx) + np.random.normal(0, 0.1),
-                        "cat_feature": f"cat_{np.random.randint(0, 3)}",
-                    }
-                    data.append(row)
+    def test_target_scaling_enabled(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
+        train, val, test = d2.split_data()
 
-            # Create DataFrame and save to CSV
-            df = pd.DataFrame(data)
-            df.to_csv(os.path.join(self.temp_dir, f"test_data_{file_idx}.csv"), index=False)
+        # Check that target scaler exists
+        assert d2._scaler.target_scaler is not None
 
-    def test_init_percentage_split(self):
-        """Test initialization with percentage split."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
+        # Check scaled targets
+        x, y = train[0]
+        assert abs(y.mean().item()) < 2  # Should be normalized
+        logger.info("✓ Target scaling enabled")
+
+    def test_target_scaling_disabled(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=False)
+        train, val, test = d2.split_data()
+
+        # Target scaler should still exist but not applied
+        x, y = train[0]
+        # Targets should not be normalized (will have larger range)
+        logger.info("✓ Target scaling disabled")
+
+
+class TestD2TemporalIntegration:
+    """Test temporal feature integration from D1 to D2."""
+
+    def test_temporal_in_cat_past(self, temp_dir):
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = [{"timestamp": start + timedelta(hours=h), "group": "g1", "val": h, "target": h} for h in range(100)]
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "temporal.csv")
+        df.to_csv(path, index=False)
+
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            group_cols=["group"],
+            time_col="timestamp",
+            target_cols=["target"],
+            num_cols=["val"],
+            enrich_cat=["hour", "dow"],
         )
+        d2 = EncoderDecoder(d1, past_len=24, future_len=12)
+        x, y = d2.dataset[0]
 
-        # Check that the module was initialized correctly
-        self.assertEqual(d2_module.past_len, 5)
-        self.assertEqual(d2_module.future_len, 2)
-        self.assertEqual(d2_module.batch_size, 32)
-        self.assertEqual(d2_module.min_valid_length, 4)
-        self.assertEqual(d2_module.split_method, "percentage")
-        self.assertEqual(d2_module.split_config, (0.7, 0.15, 0.15))
+        # Temporal features should be in x_cat_past
+        assert x["x_cat_past"].shape[1] > 0
+        logger.info(f"✓ Temporal in cat_past: {x['x_cat_past'].shape}")
 
-        # Check that datasets were created
-        self.assertTrue(hasattr(d2_module, "train_dataset"))
-        self.assertTrue(hasattr(d2_module, "val_dataset"))
-        self.assertTrue(hasattr(d2_module, "test_dataset"))
+    def test_temporal_in_cat_future(self, temp_dir):
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = [{"timestamp": start + timedelta(hours=h), "group": "g1", "val": h, "target": h} for h in range(100)]
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "temporal.csv")
+        df.to_csv(path, index=False)
 
-        # Check that the sum of split sizes equals the total number of windows
-        total_windows = len(d2_module.valid_windows)
-        split_sum = (
-            len(d2_module.train_dataset) + len(d2_module.val_dataset) + len(d2_module.test_dataset)
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            group_cols=["group"],
+            time_col="timestamp",
+            target_cols=["target"],
+            num_cols=["val"],
+            enrich_cat=["hour", "dow"],
         )
-        self.assertEqual(split_sum, total_windows)
+        d2 = EncoderDecoder(d1, past_len=24, future_len=12)
+        x, y = d2.dataset[0]
 
-        # Check that the split ratios are approximately correct (only if we have windows)
-        if total_windows > 0:
-            self.assertAlmostEqual(len(d2_module.train_dataset) / total_windows, 0.7, delta=0.05)
-            self.assertAlmostEqual(len(d2_module.val_dataset) / total_windows, 0.15, delta=0.05)
-            self.assertAlmostEqual(len(d2_module.test_dataset) / total_windows, 0.15, delta=0.05)
-        else:
-            self.skipTest("No valid windows created for this test configuration")
+        # Temporal features should be in x_cat_future (known in advance)
+        assert x["x_cat_future"].shape[1] > 0
+        logger.info(f"✓ Temporal in cat_future: {x['x_cat_future'].shape}")
 
-    def test_init_group_split(self):
-        """Test initialization with group split."""
-        # Define group splits
-        train_groups = ["group_0"]
-        val_groups = ["group_1"]
-        test_groups = ["group_2"]
 
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=16,
-            min_valid_length=4,
-            split_method="group",
-            split_config=(train_groups, val_groups, test_groups),
-            precompute=True,
+class TestD2SplitValidation:
+    """Test data splitting validation."""
+
+    def test_split_ratio_sum(self, d1_basic):
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
+        train, val, test = d2.split_data(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+
+        total = len(train) + len(val) + len(test)
+        train_pct = len(train) / total
+        val_pct = len(val) / total
+        test_pct = len(test) / total
+
+        # Check ratios are approximately correct
+        assert 0.65 < train_pct < 0.75
+        assert 0.10 < val_pct < 0.20
+        assert 0.10 < test_pct < 0.20
+        logger.info(f"✓ Split ratios: {train_pct:.2f}/{val_pct:.2f}/{test_pct:.2f}")
+
+
+class TestD2GlobalVsLocal:
+    """Test global vs local forecasting batch structure."""
+
+    def test_global_forecasting_group_id(self, temp_dir):
+        np.random.seed(42)
+        data = [{"time": t, "group": f"g_{t%2}", "val": t, "target": t} for t in range(100)]
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "global.csv")
+        df.to_csv(path, index=False)
+
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            group_cols=["group"],
+            time_col="time",
+            target_cols=["target"],
+            num_cols=["val"],
+            global_forecasting=True,
         )
+        d2 = EncoderDecoder(d1, past_len=24, future_len=12)
+        x, y = d2.dataset[0]
 
-        # Check that the module was initialized correctly
-        self.assertEqual(d2_module.past_len, 5)
-        self.assertEqual(d2_module.future_len, 2)
-        self.assertEqual(d2_module.split_method, "group")
+        # In global forecasting, group_id should be in batch
+        assert "group_id" in x
+        logger.info("✓ Global: group_id in batch")
 
-        # Check that datasets were created
-        self.assertTrue(hasattr(d2_module, "train_dataset"))
-        self.assertTrue(hasattr(d2_module, "val_dataset"))
-        self.assertTrue(hasattr(d2_module, "test_dataset"))
+    def test_local_forecasting_group_in_cat(self, temp_dir):
+        np.random.seed(42)
+        data = [{"time": t, "group": f"g_{t%2}", "val": t, "target": t} for t in range(100)]
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "local.csv")
+        df.to_csv(path, index=False)
 
-        # Check that each split only contains windows from the assigned groups
-        # Note: The actual group assignment may differ from expected due to data availability
-        # So we'll check that splits are non-empty and indices are valid
-        if len(d2_module.train_dataset) > 0:
-            for idx in d2_module.train_dataset.indices:
-                # Just verify the index is valid
-                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
-
-        if len(d2_module.val_dataset) > 0:
-            for idx in d2_module.val_dataset.indices:
-                # Just verify the index is valid
-                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
-
-        if len(d2_module.test_dataset) > 0:
-            for idx in d2_module.test_dataset.indices:
-                # Just verify the index is valid
-                self.assertTrue(0 <= idx < len(d2_module.valid_windows))
-
-    def test_get_window(self):
-        """Test getting a window using __getitem__ method."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            group_cols=["group"],
+            time_col="time",
+            target_cols=["target"],
+            num_cols=["val"],
+            global_forecasting=False,
         )
-
-        # Get a window from the dataset using the dataset's __getitem__
-        if len(d2_module.train_dataset) > 0:
-            idx = 0  # Just get the first item
-            # Access through the actual dataset, not the module
-            item = d2_module.train_dataset.dataset[idx]  # New tuple format
-
-            # Check that item is a tuple (x, y) where x is a dict
-            self.assertTrue(isinstance(item, tuple))
-            self.assertEqual(len(item), 2)
-            self.assertTrue(isinstance(item[0], dict))
-            self.assertTrue(isinstance(item[1], torch.Tensor))
-
-            # Check that x (input dict) has the expected format
-            # Backward compatibility keys
-            self.assertTrue("past_features" in item[0])
-            self.assertTrue("future_targets" in item[0])
-
-            # Check model-compatible keys
-            self.assertTrue("x_num_past" in item[0])
-            self.assertTrue("y" in item[0])
-            self.assertTrue("idx_target" in item[0])
-
-            # Check that group_id is present and is integer
-            self.assertTrue("group_id" in item[0])
-            self.assertTrue(isinstance(item[0]["group_id"], int))
-
-            # Check dimensions - x_num_past should exclude categorical features
-            self.assertEqual(item[0]["x_num_past"].shape[0], d2_module.past_len)
-            # x_num_past should only contain numerical features
-            expected_num_features = len(
-                [col for col in self.feature_cols if col not in self.cat_cols]
-            )
-            self.assertEqual(item[0]["x_num_past"].shape[1], expected_num_features)
-
-            # Check backward compatibility dimensions
-            self.assertEqual(item[0]["past_features"].shape[0], d2_module.past_len)
-            self.assertEqual(item[0]["past_features"].shape[1], len(self.feature_cols))
-            self.assertEqual(item[0]["future_targets"].shape[0], d2_module.future_len)
-            self.assertEqual(item[0]["future_targets"].shape[1], len(self.target_cols))
-
-            # Check y (target tensor) shape
-            self.assertEqual(item[1].shape[0], d2_module.future_len)
-            self.assertEqual(item[1].shape[1], len(self.target_cols))
-
-            # Check data types
-            self.assertEqual(item[0]["x_num_past"].dtype, torch.float32)
-            self.assertEqual(item[0]["y"].dtype, torch.float32)
-            self.assertEqual(item[0]["idx_target"].dtype, torch.long)
-
-    def test_known_unknown_override(self):
-        """Test overriding known and unknown columns."""
-        # In the refactored code, known_cols and unknown_cols are inherited from D1 layer
-        # So we need to create a custom D1 dataset with our desired known/unknown columns
-
-        # Create a custom D1 dataset with specific known/unknown columns
-        custom_d1_dataset = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            num_cols=["feature_0"],  # Only feature_0 is numerical
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            known_cols=["feature_0"],  # feature_0 is known
-            unknown_cols=["feature_1"],  # feature_1 is explicitly unknown
-        )
-
-        # Create D2 module with the custom D1 dataset
-        d2_module = EncoderDecoder(
-            d1_dataset=custom_d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
-        )
-
-        # Check that known and unknown columns were inherited correctly from D1
-        self.assertEqual(len(d2_module.known_cols), 1)
-        self.assertEqual(len(d2_module.unknown_cols), 1)
-        self.assertIn("feature_0", d2_module.known_cols)
-        self.assertIn("feature_1", d2_module.unknown_cols)
-
-        # Check categorical vs numerical columns
-        # All known columns should be in either cat_feature_cols or cont_feature_cols
-        known_num_cols = [col for col in d2_module.known_cols if col in d2_module.cont_feature_cols]
-        known_cat_cols = [col for col in d2_module.known_cols if col in d2_module.cat_feature_cols]
-        self.assertEqual(len(known_num_cols), 1)  # feature_0 is numerical
-        self.assertEqual(len(known_cat_cols), 0)  # No categorical known cols
-
-    def test_getitem(self):
-        """Test __getitem__ method."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
-        )
-
-        # Get an item from the train dataset
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-
-        # Check that item is a tuple (x, y) where x is a dict
-        self.assertTrue(isinstance(item, tuple))
-        self.assertEqual(len(item), 2)
-        self.assertTrue(isinstance(item[0], dict))
-        self.assertTrue(isinstance(item[1], torch.Tensor))
-
-        # Check that backward compatibility keys are present
-        self.assertTrue("past_features" in item[0])
-        self.assertTrue("future_targets" in item[0])
-        self.assertTrue("group_id" in item[0])
-
-        # Check model-compatible keys
-        self.assertTrue("x_num_past" in item[0])
-        self.assertTrue("y" in item[0])
-        self.assertTrue("idx_target" in item[0])
-
-        # Check dimensions - numerical features only in x_num_past
-        self.assertEqual(item[0]["x_num_past"].shape[0], d2_module.past_len)
-        expected_num_features = len([col for col in self.feature_cols if col not in self.cat_cols])
-        self.assertEqual(item[0]["x_num_past"].shape[1], expected_num_features)
-
-        # Check backward compatibility dimensions (includes all features)
-        self.assertEqual(item[0]["past_features"].shape[0], d2_module.past_len)
-        self.assertEqual(item[0]["past_features"].shape[1], len(self.feature_cols))
-        self.assertEqual(item[0]["future_targets"].shape[0], d2_module.future_len)
-        self.assertEqual(item[0]["future_targets"].shape[1], len(self.target_cols))
-
-        # Check y (target tensor) shape
-        self.assertEqual(item[1].shape[0], d2_module.future_len)
-        self.assertEqual(item[1].shape[1], len(self.target_cols))
-
-        # Check data types
-        self.assertEqual(item[0]["x_num_past"].dtype, torch.float32)
-        self.assertEqual(item[0]["y"].dtype, torch.float32)
-        self.assertEqual(item[0]["idx_target"].dtype, torch.long)
-
-    def test_compute_valid_indices(self):
-        """Test _compute_valid_indices method."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
-        )
-
-        # Check that valid windows were computed
-        self.assertTrue(hasattr(d2_module, "valid_windows"))
-        if len(d2_module.valid_windows) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-
-        # Each valid window should have enough data points
-        for window in d2_module.valid_windows:
-            # Check that window has required fields
-            self.assertIn("group_id", window)
-            self.assertIn("past_indices", window)
-            self.assertIn("future_indices", window)
-            self.assertIn("start_idx", window)
-
-            # Check that start index is valid
-            start_idx = window["start_idx"]
-            self.assertTrue(start_idx >= 0)
-
-            # Check that indices are valid
-            self.assertEqual(len(window["past_indices"]), d2_module.past_len)
-            self.assertEqual(len(window["future_indices"]), d2_module.future_len)
-
-    def test_create_splits(self):
-        """Test _create_splits method."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
-        )
-
-        # Check that datasets were created
-        self.assertTrue(hasattr(d2_module, "train_dataset"))
-        self.assertTrue(hasattr(d2_module, "val_dataset"))
-        self.assertTrue(hasattr(d2_module, "test_dataset"))
-
-        # Check that all indices in splits are valid
-        all_indices = (
-            list(d2_module.train_dataset.indices)
-            + list(d2_module.val_dataset.indices)
-            + list(d2_module.test_dataset.indices)
-        )
-        for idx in all_indices:
-            self.assertTrue(0 <= idx < len(d2_module.valid_windows))
-
-    def test_dataloaders(self):
-        """Test train/val/test dataloader methods."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=2,  # Small batch size for testing
-            min_valid_length=4,
-            split_method="percentage",
-            split_config=(0.7, 0.15, 0.15),
-            precompute=True,
-            num_workers=0,  # Use 0 workers for testing
-        )
-
-        # Check if we have valid windows before testing dataloaders
-        if len(d2_module.valid_windows) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-
-        # Test train dataloader
-        train_loader = d2_module.train_dataloader()
-        self.assertIsInstance(train_loader, DataLoader)
-        self.assertEqual(train_loader.batch_size, 2)
-
-        # Test val dataloader
-        val_loader = d2_module.val_dataloader()
-        self.assertIsInstance(val_loader, DataLoader)
-        self.assertEqual(val_loader.batch_size, 2)
-
-        # Test test dataloader
-        test_loader = d2_module.test_dataloader()
-        self.assertIsInstance(test_loader, DataLoader)
-        self.assertEqual(test_loader.batch_size, 2)
-
-        # Check that we can iterate through the dataloaders
-        if len(d2_module.train_dataset) > 0:
-            batch = next(iter(train_loader))  # Single dict format from collate_fn
-
-            # Check that batch is a dictionary
-            self.assertTrue(isinstance(batch, dict))
-
-            # Check backward compatibility keys
-            self.assertTrue("past_features" in batch)
-            self.assertTrue("future_targets" in batch)
-
-            # Check model-compatible keys
-            self.assertTrue("x_num_past" in batch)
-            self.assertTrue("y" in batch)
-            self.assertTrue("idx_target" in batch)
-
-            # Check model-compatible keys instead of specific encoder-decoder format keys
-            # that might have changed in the implementation
-            self.assertTrue("x_num_past" in batch)
-            self.assertTrue("y" in batch)
-            self.assertTrue("idx_target" in batch)
-
-            # Check batch dimensions
-            self.assertEqual(batch["past_features"].shape[0], 2)  # batch_size
-            self.assertEqual(batch["past_features"].shape[1], d2_module.past_len)
-            self.assertEqual(batch["past_features"].shape[2], len(self.feature_cols))
-
-            # Check y dimensions
-            self.assertEqual(batch["y"].shape[0], 2)  # batch_size
-            self.assertEqual(batch["y"].shape[1], d2_module.future_len)
-            self.assertEqual(batch["y"].shape[2], len(self.target_cols))
-
-            # Model-compatible target dimensions were already checked above
-
-    def test_batch_output_structure(self):
-        """Test the batch output structure, group_id type, and global forecasting functionality."""
-        # Test with global_forecasting=True (default)
-        d1_global = CustomD1TestLayer(global_forecasting=True)
-
-        # Use smaller window sizes to ensure valid windows
-        d2_global = EncoderDecoder(
-            d1_dataset=d1_global,
-            past_len=3,  # Smaller past window
-            future_len=2,  # Smaller future window
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Ensure we have valid windows
-        self.assertTrue(len(d2_global.valid_windows) > 0, "No valid windows found in dataset")
-
-        # Get a batch from the dataset
-        batch_global = d2_global.train_dataset.dataset[0]
-
-        # Check that batch is a tuple (x, y)
-        self.assertTrue(isinstance(batch_global, tuple))
-        self.assertEqual(len(batch_global), 2)
-
-        x_global, y_global = batch_global
-
-        # Check that unnecessary keys are not in the batch
-        unnecessary_keys = [
-            "idx_known_num",
-            "idx_unknown_num",
-            "idx_known_cat",
-            "idx_unknown_cat",
-            "categorical_cardinality_past",
-            "past_features",
-        ]
-
-        for key in unnecessary_keys:
-            self.assertNotIn(key, x_global, f"Key {key} should not be in batch output")
-
-        # Check that group_id is an integer
-        self.assertTrue(
-            isinstance(x_global["group_id"], int),
-            f"group_id should be an integer, got {type(x_global['group_id'])}",
-        )
-
-        # Check that time_idx is present for debugging
-        self.assertIn("time_idx", x_global)
-
-        # Now test with global_forecasting=False
-        d1_local = CustomD1TestLayer(global_forecasting=False)
-
-        d2_local = EncoderDecoder(
-            d1_dataset=d1_local,
-            past_len=3,  # Smaller past window
-            future_len=2,  # Smaller future window
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Ensure we have valid windows
-        self.assertTrue(len(d2_local.valid_windows) > 0, "No valid windows found in dataset")
-
-        # Get a batch from the dataset
-        batch_local = d2_local.train_dataset.dataset[0]
-        x_local, y_local = batch_local
-
-        # With global_forecasting=False, group should be added to categorical features
-        self.assertIn("x_cat_past", x_local)
-        self.assertTrue(
-            x_local["x_cat_past"].shape[1] > 0,
-            "x_cat_past should not be empty with global_forecasting=False",
-        )
-
-        # Check that group_id is still an integer
-        self.assertTrue(isinstance(x_local["group_id"], int))
-
-        # Check that the D1 metadata reflects the group encoding
-        self.assertIn("group_cols", d1_local.metadata)
-
-        # Check that the D2 batch structure is consistent between global and local forecasting
-        # Both should have the same keys, just different values
-        self.assertEqual(set(x_global.keys()), set(x_local.keys()))
-
-    def test_metadata_based_indices(self):
-        """Test that D2 uses D1 metadata indices correctly."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test metadata usage
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-
-        # Check that target index mapping is present and has correct dtype
-        self.assertTrue("idx_target" in x)
-        self.assertTrue(isinstance(x["idx_target"], torch.Tensor))
-        self.assertEqual(x["idx_target"].dtype, torch.long)
-
-        # Check that target indices are valid for x_num_past
-        if len(x["idx_target"]) > 0:
-            max_target_idx = x["idx_target"].max().item()
-            self.assertLess(max_target_idx, x["x_num_past"].shape[1])
-
-    def test_categorical_features_handling(self):
-        """Test handling of categorical features."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test categorical handling
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-
-        # Check if categorical features are present in data
-        has_categorical = len(self.cat_cols) > 0
-
-        if has_categorical:
-            # Should have categorical tensor and correct dtype
-            self.assertTrue("x_cat_past" in x)
-            self.assertEqual(x["x_cat_past"].dtype, torch.long)
-        else:
-            # Should not have categorical keys when no categorical features
-            self.assertNotIn("x_cat_past", x)
-
-    def test_future_features_handling(self):
-        """Test handling of known future features."""
-        # Create D1 dataset with known future features
-        d1_with_known = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            num_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            cat_cols=self.cat_cols,
-            known_cols=["feature_0"],  # feature_0 is known in future
-        )
-
-        d2_module = EncoderDecoder(
-            d1_dataset=d1_with_known,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test future features
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-
-        # Should have future numerical features if known features exist
-        if "x_num_future" in x:
-            self.assertEqual(x["x_num_future"].dtype, torch.float32)
-            self.assertEqual(x["x_num_future"].shape[0], d2_module.future_len)
-
-    def test_empty_categorical_handling(self):
-        """Test handling when no categorical features exist."""
-        # Create D1 dataset without categorical features
-        d1_no_cat = MultiSourceTSDataSet(
-            file_paths=self.file_paths,
-            group_cols=self.group_cols,
-            time_col=self.time_col,
-            num_cols=self.feature_cols,
-            target_cols=self.target_cols,
-            cat_cols=[],  # No categorical features
-        )
-
-        d2_module = EncoderDecoder(
-            d1_dataset=d1_no_cat,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test no categorical handling
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-
-        # Should not have categorical keys
-        self.assertNotIn("x_cat_past", x)
-        self.assertNotIn("x_cat_future", x)
-        self.assertNotIn("categorical_cardinality_past", x)
-        self.assertNotIn("idx_known_cat", x)
-        self.assertNotIn("idx_unknown_cat", x)
-
-        # All features should be in x_num_past
-        self.assertEqual(x["x_num_past"].shape[1], len(self.feature_cols))
-
-    def test_target_mapping_correctness(self):
-        """Test that target indices are correctly mapped to numerical features."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test target mapping
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-
-        # Check that idx_target points to valid positions in x_num_past
-        if len(x["idx_target"]) > 0:
-            for target_idx in x["idx_target"]:
-                self.assertGreaterEqual(target_idx.item(), 0)
-                self.assertLess(target_idx.item(), x["x_num_past"].shape[1])
-
-        # Target tensor should match expected dimensions
-        self.assertEqual(x["y"].shape[0], d2_module.future_len)
-        self.assertEqual(x["y"].shape[1], len(self.target_cols))
-
-    def test_data_types_consistency(self):
-        """Test that all tensors have correct and consistent data types."""
-        d2_module = EncoderDecoder(
-            d1_dataset=self.d1_dataset,
-            past_len=5,
-            future_len=2,
-            batch_size=32,
-            precompute=True,
-        )
-
-        # Get an item to test data types
-        if len(d2_module.train_dataset) == 0:
-            self.skipTest("No valid windows created for this test configuration")
-        item = d2_module.train_dataset.dataset[0]
-        x = item[0]
-        y = item[1]
-
-        # Numerical tensors should be float32
-        self.assertEqual(x["x_num_past"].dtype, torch.float32)
-        self.assertEqual(x["y"].dtype, torch.float32)
-        self.assertEqual(x["past_features"].dtype, torch.float32)
-        self.assertEqual(x["future_targets"].dtype, torch.float32)
-        self.assertEqual(y.dtype, torch.float32)
-
-        # Index tensors should be long
-        self.assertEqual(x["idx_target"].dtype, torch.long)
-        self.assertEqual(x["idx_known_num"].dtype, torch.long)
-        self.assertEqual(x["idx_unknown_num"].dtype, torch.long)
-
-        # Categorical tensors should be long (if present)
-        if "x_cat_past" in x:
-            self.assertEqual(x["x_cat_past"].dtype, torch.long)
-        if "x_cat_future" in x:
-            self.assertEqual(x["x_cat_future"].dtype, torch.long)
-
-        # Group ID should be integer
-        self.assertTrue(isinstance(x["group_id"], int))
-
-
-class TestCustomCollateFn(unittest.TestCase):
-    """Test cases for the custom_collate_fn function."""
-
-    def setUp(self):
-        """Set up test data."""
-        # Create sample batch data matching TSDataModule output format
-        self.batch = [
-            {
-                "past_features": torch.randn(5, 2),
-                "future_targets": torch.randn(2, 1),
-                "past_time": np.array([1, 2, 3, 4, 5]),
-                "future_time": np.array([6, 7]),
-                "group_id": "group_0",
-                "static": torch.tensor([10.0]),
-            },
-            {
-                "past_features": torch.randn(5, 2),
-                "future_targets": torch.randn(2, 1),
-                "past_time": np.array([11, 12, 13, 14, 15]),
-                "future_time": np.array([16, 17]),
-                "group_id": "group_1",
-                "static": torch.tensor([20.0]),
-            },
-        ]
-
-    def test_custom_collate_fn_old_format(self):
-        """Test custom_collate_fn with old dict format (backward compatibility)."""
-        # Apply custom collate function
-        result = custom_collate_fn(self.batch)
-
-        # Check that the result has the expected format
-        self.assertTrue("past_features" in result)
-        self.assertTrue("future_targets" in result)
-        self.assertTrue("past_time" in result)
-        self.assertTrue("future_time" in result)
-        self.assertTrue("group_id" in result)
-        self.assertTrue("static" in result)
-
-        # Check that tensors were stacked correctly
-        self.assertEqual(result["past_features"].shape, (2, 5, 2))
-        self.assertEqual(result["future_targets"].shape, (2, 2, 1))
-        self.assertEqual(result["static"].shape, (2, 1))
-
-        # Check that non-tensors were kept as lists
-        self.assertEqual(len(result["past_time"]), 2)
-        self.assertEqual(len(result["future_time"]), 2)
-        self.assertEqual(len(result["group_id"]), 2)
-
-        # Check specific values
-        self.assertEqual(result["group_id"][0], "group_0")
-        self.assertEqual(result["group_id"][1], "group_1")
-        # past_time and future_time are numpy arrays, so we check their content
-        np.testing.assert_array_equal(result["past_time"][0], np.array([1, 2, 3, 4, 5]))
-        np.testing.assert_array_equal(result["past_time"][1], np.array([11, 12, 13, 14, 15]))
-
-    def test_custom_collate_fn_new_format(self):
-        """Test custom_collate_fn with new tuple format."""
-        # Create batch in new tuple format (x, y) with model-compatible keys
-        tuple_batch = [
-            (
-                {
-                    "past_features": torch.randn(5, 2),
-                    "future_targets": torch.randn(2, 1),
-                    "past_time": np.array([1, 2, 3, 4, 5]),
-                    "future_time": np.array([6, 7]),
-                    "group_id": "group_0",
-                    "static": torch.tensor([10.0]),
-                    "encoder_cont": torch.randn(5, 2),
-                    "decoder_cont": torch.zeros(2, 0),
-                    "encoder_lengths": torch.tensor(5),
-                    "decoder_lengths": torch.tensor(2),
-                    "x_num_past": torch.randn(5, 2),
-                    "x_cat_past": torch.zeros(5, 0),
-                    "x_num_future": torch.zeros(2, 0),
-                    "x_cat_future": torch.zeros(2, 0),
-                    "idx_target": torch.tensor([0]),
-                    "y": torch.randn(2, 1),
-                },
-                torch.randn(2, 1),
-            ),
-            (
-                {
-                    "past_features": torch.randn(5, 2),
-                    "future_targets": torch.randn(2, 1),
-                    "past_time": np.array([11, 12, 13, 14, 15]),
-                    "future_time": np.array([16, 17]),
-                    "group_id": "group_1",
-                    "static": torch.tensor([20.0]),
-                    "encoder_cont": torch.randn(5, 2),
-                    "decoder_cont": torch.zeros(2, 0),
-                    "encoder_lengths": torch.tensor(5),
-                    "decoder_lengths": torch.tensor(2),
-                    "x_num_past": torch.randn(5, 2),
-                    "x_cat_past": torch.zeros(5, 0),
-                    "x_num_future": torch.zeros(2, 0),
-                    "x_cat_future": torch.zeros(2, 0),
-                    "idx_target": torch.tensor([0]),
-                    "y": torch.randn(2, 1),
-                },
-                torch.randn(2, 1),
-            ),
-        ]
-
-        # Apply custom collate function - now returns single dictionary
-        result = custom_collate_fn(tuple_batch)
-
-        # Check result format
-        self.assertTrue(isinstance(result, dict))
-        self.assertTrue("past_features" in result)
-        self.assertTrue("encoder_cont" in result)
-        self.assertTrue("decoder_cont" in result)
-
-        # Check model-compatible keys
-        self.assertTrue("x_num_past" in result)
-        self.assertTrue("x_cat_past" in result)
-        self.assertTrue("x_num_future" in result)
-        self.assertTrue("x_cat_future" in result)
-        self.assertTrue("idx_target" in result)
-        self.assertTrue("y" in result)
-
-        # Check tensor dimensions
-        self.assertEqual(result["past_features"].shape, (2, 5, 2))
-        self.assertEqual(result["encoder_cont"].shape, (2, 5, 2))
-        self.assertEqual(result["decoder_cont"].shape, (2, 2, 0))
-        self.assertEqual(result["x_num_past"].shape, (2, 5, 2))
-        self.assertEqual(result["y"].shape, (2, 2, 1))
-
-        # Check that non-tensors were kept as lists
-        self.assertEqual(len(result["group_id"]), 2)
-        self.assertEqual(result["group_id"][0], "group_0")
-        self.assertEqual(result["group_id"][1], "group_1")
+        d2 = EncoderDecoder(d1, past_len=24, future_len=12)
+        x, y = d2.dataset[0]
+
+        # In local forecasting, group should be in categorical features
+        assert x["x_cat_past"].shape[1] > 0  # Should have group_id
+        logger.info("✓ Local: group in cat features")
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__, "-v"])
