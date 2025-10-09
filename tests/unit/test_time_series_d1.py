@@ -62,7 +62,8 @@ def basic_csv_data(temp_dir):
         "target_cols": ["target_0"],
         "num_cols": ["num_0", "num_1"],
         "cat_cols": ["cat_0"],
-        "known_cols": ["num_0"],
+        "past_cols": ["num_0", "num_1", "cat_0"],  # All features in past
+        "future_cols": ["num_0"],  # Only num_0 known in future
     }
 
 
@@ -180,18 +181,20 @@ class TestD1GlobalForecasting:
         logger.info("✓ Local forecasting")
 
 
-class TestD1KnownUnknown:
-    """Test known/unknown column handling."""
+class TestD1PastFuture:
+    """Test past/future column handling."""
 
-    def test_known_cols(self, basic_csv_data):
+    def test_past_cols(self, basic_csv_data):
         d1 = MultiSourceTSDataSet(**basic_csv_data)
-        assert "num_0" in d1.known_cols
-        logger.info(f"✓ Known cols: {d1.known_cols}")
+        assert "num_0" in d1.past_cols
+        assert "num_1" in d1.past_cols
+        logger.info(f"✓ Past cols: {d1.past_cols}")
 
-    def test_unknown_cols(self, basic_csv_data):
-        d1 = MultiSourceTSDataSet(**basic_csv_data, unknown_cols=["num_1"])
-        assert "num_1" in d1.unknown_cols
-        logger.info(f"✓ Unknown cols: {d1.unknown_cols}")
+    def test_future_cols(self, basic_csv_data):
+        d1 = MultiSourceTSDataSet(**basic_csv_data)
+        assert "num_0" in d1.future_cols
+        assert "num_1" not in d1.future_cols  # num_1 not in future
+        logger.info(f"✓ Future cols: {d1.future_cols}")
 
 
 class TestD1EdgeCases:
@@ -275,6 +278,90 @@ class TestD1TemporalEdgeCases:
         for feat in ["minute", "hour", "dow", "month"]:
             assert feat in sample["cat_cols"]
         logger.info("✓ All temporal features")
+
+    def test_temporal_cardinalities_validation(self, temp_dir):
+        """COMPREHENSIVE: Validate temporal features have correct cardinalities."""
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = []
+        for h in range(200):
+            data.append({"timestamp": start + timedelta(hours=h), "group": "g1", "val": h, "target": h})
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        # Test with hour and dow
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            num_cols=["val"],
+            target_cols=["target"],
+            enrich_cat=["hour", "dow"],
+        )
+
+        # Get sample to check cardinalities
+        sample = d1[0]
+
+        # STRONG VALIDATION: Check cardinalities are present and correct
+        assert "cat_cardinalities" in sample, "cat_cardinalities missing from sample"
+        cardinalities = sample["cat_cardinalities"]
+
+        # Should have: group (1), hour (24), dow (7)
+        assert len(cardinalities) == 3, f"Expected 3 cardinalities, got {len(cardinalities)}: {cardinalities}"
+
+        # STRONG VALIDATION: Check specific values
+        assert 24 in cardinalities, f"hour cardinality (24) not found in {cardinalities}"
+        assert 7 in cardinalities, f"dow cardinality (7) not found in {cardinalities}"
+
+        logger.info(f"✓ Temporal cardinalities validated: {cardinalities}")
+
+    def test_all_temporal_cardinalities(self, temp_dir):
+        """COMPREHENSIVE: Test all temporal feature cardinalities."""
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = []
+        # Generate data spanning multiple months and with varying minutes
+        for d in range(90):  # 90 days to cover multiple months
+            for h in range(24):  # 4 times per day
+                for m in range(60):  # Different minutes
+                    data.append(
+                        {
+                            "timestamp": start + timedelta(days=d, hours=h, minutes=m),
+                            "group": "g1",
+                            "val": len(data),
+                            "target": len(data),
+                        }
+                    )
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        # Test with all temporal features
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            num_cols=["val"],
+            target_cols=["target"],
+            enrich_cat=["hour", "dow", "month", "minute"],
+        )
+
+        sample = d1[0]
+        cat_cols = sample["cat_cols"]
+        cardinalities = sample["cat_cardinalities"]
+
+        # STRONG VALIDATION: Check all temporal features present
+        assert len(cat_cols) >= 4, f"Expected at least 4 cat_cols, got {len(cat_cols)}"
+
+        # STRONG VALIDATION: Verify specific cardinalities
+        expected_cardinalities = {24, 7, 3, 60}  # hour, dow, month, minute
+        found_cardinalities = set(cardinalities)
+
+        for expected in expected_cardinalities:
+            assert expected in found_cardinalities, f"Expected cardinality {expected} not found in {cardinalities}"
+
+        logger.info(f"✓ All temporal cardinalities correct: {cardinalities}")
 
 
 if __name__ == "__main__":

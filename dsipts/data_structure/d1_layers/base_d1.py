@@ -66,11 +66,11 @@ class BaseD1Layer(ABC):
         return self._cat_cols
 
     @property
-    def known_cols(self) -> Optional[List[str]]:
-        """Get the known future columns."""
-        return self._known_cols
+    def past_cols(self) -> Optional[List[str]]:
+        """Get the columns available in past sequence."""
+        return self._past_cols
 
     @property
-    def unknown_cols(self) -> Optional[List[str]]:
-        """Get the unknown future columns."""
-        return self._unknown_cols
+    def future_cols(self) -> Optional[List[str]]:
+        """Get the columns available in future sequence."""
+        return self._future_cols

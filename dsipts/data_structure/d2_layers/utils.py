@@ -129,14 +129,13 @@ def build_valid_windows(
                     "group_id": group_id,
                     "start_idx": i,
                     "past_len": past_len,
-                    "future_len": future_len,
                 }
                 valid_windows.append(window)
                 group_windows += 1
 
                 # Limit samples per group if specified
                 if (
-                    max_samples_per_group
+                    max_samples_per_group is not None
                     and len([w for w in valid_windows if w["group_id"] == group_id]) >= max_samples_per_group
                 ):
                     break
@@ -144,7 +143,6 @@ def build_valid_windows(
             windows_per_group[group_id] = group_windows
         else:
             insufficient_groups.append(group_id)
-
     logger.info(f"Created {len(valid_windows)} windows from {len(windows_per_group)} groups")
     if insufficient_groups:
         logger.debug(f"Skipped {len(insufficient_groups)} groups with insufficient data")

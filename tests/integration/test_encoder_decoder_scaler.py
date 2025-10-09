@@ -1,14 +1,13 @@
 """
-MAIN TEST FILE
-Tests for the StandardScaler functionality in EncoderDecoder class.
+Tests for scikit-learn scaler integration in EncoderDecoder class.
+Tests StandardScaler and MinMaxScaler with the simplified API.
 """
 
 import logging
+import tempfile
 
 import numpy as np
 import pandas as pd
-import torch
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from tabulate import tabulate
 
 from dsipts.data_structure.d1_layers.multi_source_csv import MultiSourceTSDataSet
@@ -21,17 +20,13 @@ logger = logging.getLogger(__name__)
 
 def create_test_data():
     """Create a simple test dataset with known mean and standard deviation."""
-    # Create a dataframe with numeric features that have specific mean and std
     np.random.seed(42)
 
-    # Create 100 rows of data with 3 numeric features
-    # Feature 1: mean=0, std=1
-    # Feature 2: mean=10, std=5
-    # Feature 3: mean=-5, std=2
+    # Create 100 rows of data with 3 numeric features and 2 targets
     n_rows = 100
     df = pd.DataFrame(
         {
-            "time": pd.date_range(start="2023-01-01", periods=n_rows, freq="H"),
+            "time": pd.date_range(start="2023-01-01", periods=n_rows, freq="h"),
             "feature1": np.random.normal(0, 1, n_rows),
             "feature2": np.random.normal(10, 5, n_rows),
             "feature3": np.random.normal(-5, 2, n_rows),
@@ -40,11 +35,12 @@ def create_test_data():
         }
     )
 
-    # Save to CSV
-    csv_path = "/tmp/test_scaler_data.csv"
-    df.to_csv(csv_path, index=False)
+    # Save to temporary CSV
+    temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
+    df.to_csv(temp_file.name, index=False)
+    temp_file.close()
 
-    return csv_path, df
+    return temp_file.name, df
 
 
 def log_data_statistics(df, feature_cols, title="Data Statistics"):
@@ -124,7 +120,7 @@ def test_standard_scaler():
         past_len=24,
         future_len=12,
         batch_size=16,
-        scaler=StandardScaler(),
+        scaling_method="standard",
         scale_targets=False,
     )
 
@@ -138,8 +134,8 @@ def test_standard_scaler():
 
     # Verify scaler parameters match the original data statistics
     # The scaler should have been fitted on the training data only
-    feature_means = d2_dataset.scaler.mean_
-    feature_stds = np.sqrt(d2_dataset.scaler.var_)
+    feature_means = d2_dataset.feature_scaler.mean_
+    feature_stds = np.sqrt(d2_dataset.feature_scaler.var_)
 
     # Log scaler metadata
     logger.info("\nStandardScaler Metadata:")
@@ -228,7 +224,6 @@ def test_standard_scaler():
     ), "Scaled train features should have std close to 1"
 
     logger.info("StandardScaler test passed!")
-    return True
 
 
 def test_custom_scaler():
@@ -257,7 +252,7 @@ def test_custom_scaler():
         past_len=24,
         future_len=12,
         batch_size=16,
-        scaler=MinMaxScaler(),
+        scaling_method="minmax",
         scale_targets=False,
     )
 
@@ -326,7 +321,6 @@ def test_custom_scaler():
     visualize_data_transformation(original_samples, scaled_samples, feature_cols, "MinMaxScaler Transformation")
 
     logger.info("Custom scaler (MinMaxScaler) test passed!")
-    return True
 
 
 def test_target_scaling():
@@ -357,7 +351,7 @@ def test_target_scaling():
         past_len=24,
         future_len=12,
         batch_size=16,
-        scaler=StandardScaler(),
+        scaling_method="standard",
         scale_targets=True,
     )
 
@@ -373,8 +367,8 @@ def test_target_scaling():
     # Log feature scaler metadata
     logger.info("\nFeature StandardScaler Metadata:")
     logger.info(f"Feature names: {feature_cols}")
-    logger.info(f"Feature scaler means: {d2_dataset.scaler.mean_}")
-    logger.info(f"Feature scaler stds: {np.sqrt(d2_dataset.scaler.var_)}")
+    logger.info(f"Feature scaler means: {d2_dataset.feature_scaler.mean_}")
+    logger.info(f"Feature scaler stds: {np.sqrt(d2_dataset.feature_scaler.var_)}")
 
     # Log target scaler metadata
     logger.info("\nTarget StandardScaler Metadata:")
@@ -388,9 +382,9 @@ def test_target_scaling():
         feature_scaler_params.append(
             {
                 "Feature": col,
-                "Mean": d2_dataset.scaler.mean_[i],
-                "Std": np.sqrt(d2_dataset.scaler.var_)[i],
-                "Scale Factor": 1 / np.sqrt(d2_dataset.scaler.var_)[i] if d2_dataset.scaler.var_[i] > 0 else 0,
+                "Mean": d2_dataset.feature_scaler.mean_[i],
+                "Std": np.sqrt(d2_dataset.feature_scaler.var_)[i],
+                "Scale Factor": 1 / np.sqrt(d2_dataset.feature_scaler.var_)[i] if d2_dataset.feature_scaler.var_[i] > 0 else 0,
             }
         )
 
@@ -482,14 +476,10 @@ def test_target_scaling():
         train_target_std, np.ones_like(train_target_std), atol=0.5
     ), "Scaled train targets should have std close to 1"
 
-    # Also check that the targets in the x dictionary are scaled
-    assert torch.allclose(train_sample["y"], train_target), "y in sample dictionary should match the scaled target"
-    assert torch.allclose(
-        train_sample["future_targets"], train_target
-    ), "future_targets in sample dictionary should match the scaled target"
+    # The targets are returned separately as y, not in the x dictionary
+    # Just verify they are scaled (already checked above with train_target_mean and std)
 
     logger.info("Target scaling test passed!")
-    return True
 
 
 if __name__ == "__main__":

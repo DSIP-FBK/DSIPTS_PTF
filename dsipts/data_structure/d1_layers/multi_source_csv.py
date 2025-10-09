@@ -53,13 +53,14 @@ class MultiSourceTSDataSet(BaseD1Layer):
         target_cols: Optional[List[str]] = None,
         cat_cols: Optional[List[str]] = None,
         num_cols: Optional[List[str]] = None,
-        known_cols: Optional[List[str]] = None,
-        unknown_cols: Optional[List[str]] = None,
+        past_cols: Optional[List[str]] = None,
+        future_cols: Optional[List[str]] = None,
         enrich_cat: Optional[List[str]] = None,
         global_forecasting: bool = False,
         weights: Optional[str] = None,
         memory_efficient: bool = False,
         chunk_size: int = 10000,
+        read_options: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the MultiSourceTSDataSet.
@@ -70,20 +71,28 @@ class MultiSourceTSDataSet(BaseD1Layer):
             group_cols: Column(s) that identify unique time series groups
             time_col: Column containing time/date information
             target_cols: Columns to use as targets (y)
-            cat_cols: Categorical columns that need encoding
+            cat_cols: Categorical columns
             num_cols: Numerical columns (if None, all non-categorical columns are treated as numerical)
-            known_cols: Known columns at prediction time (feature columns that are known)
-            unknown_cols: Unknown columns at prediction time (if None, all target_cols are considered unknown)
+            past_cols: Columns available in past sequence (if None, all features used)
+            future_cols: Columns available in future sequence
+                (if None, temporal + group features used)
             enrich_cat: List of temporal categorical variables to create. Supported values: ['hour', 'dow', 'month', 'minute']
-            global_forecasting: If True, use global forecasting. If False (default)
-                and multiple groups exist, add group as categorical known variable.
+            global_forecasting:  set as False by default
             weights: Name of weights column
             memory_efficient: Whether to use memory-efficient mode
             chunk_size: Chunk size for processing data (used in memory-efficient mode)
+            read_options: Dictionary of options to pass to pandas read functions
+                Examples:
+                - {'sep': ';'} for semicolon-separated files
+                - {'na_values': ['NA', 'NULL', '-9999']} for custom missing
+                - {'usecols': ['col1', 'col2']} to read specific columns
+                - {'dtype': {'col1': 'int32'}} to specify data types
         """
         super().__init__()
 
-        # Validate input - must provide either file_paths or dataframes
+        # Store read options for file reading
+        self.read_options = read_options if read_options is not None else {}
+
         if not file_paths and not dataframes:
             raise ValueError("Must provide either file_paths or dataframes")
         if file_paths and dataframes:
@@ -117,43 +126,45 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._enrich_cat = enrich_cat or []
         self.global_forecasting = global_forecasting
 
-        self._known_cols = known_cols or []
-        self._unknown_cols = unknown_cols or list(self._target_cols) if self._target_cols else []
-        self._original_known_cols = self._known_cols.copy() if self._known_cols else []
+        self._past_cols = past_cols or []
+        self._future_cols = future_cols or []
+        self._original_future_cols = self._future_cols.copy() if self._future_cols else []
 
-        # if global_forecasting =False and multiple groups exist, add group columns to categorical and known variables
+        # if global_forecasting =False and multiple groups exist, add group columns to categorical and future variables
         self._apply_global_forecasting_logic()
 
         # Infer feature_cols automatically from headers and other specifications
         self._feature_cols = self._infer_feature_columns()
         self._validate_enrich_cat()
 
-        # Flag to track if temporal features have been added to categorical columns
-        self._is_file_read = False
+        self._is_file_read = False  # Flag to track if temporal features have been added to cat columns
 
-        # If _num_cols not specified, infer from feature_cols and cat_cols
-        if not self._num_cols:
+        if not self._num_cols:  # infer from feature_cols and cat_cols
             all_cols = self._feature_cols + self._target_cols
             self._num_cols = [c for c in all_cols if c not in self._cat_cols]
 
-        # Internal state
-        self.memory_efficient = memory_efficient
+        # Internal state - handle memory_efficient for DataFrames
+        if self.use_dataframes and memory_efficient:
+            logger.warning(
+                "Memory-efficient mode is not supported when loading from DataFrames. "
+                "All data will be processed in-memory. Setting memory_efficient=False."
+            )
+            self.memory_efficient = False
+        else:
+            self.memory_efficient = memory_efficient
         self.chunk_size = chunk_size
 
         # Initialize data structures
         self.group_info = {}
         self.label_encoders = {}
         self.file_group_map = []
-        self.cached_data = {} if not memory_efficient else None
+        self.cached_data = {} if not self.memory_efficient else None
 
-        # Process the data (files or dataframes)
-        if self.use_dataframes:
-            self._process_dataframes()
-        else:
-            self._process_files()
+        # Process the data (unified for files and dataframes)
+        self._process_data()
 
         self._prepare_metadata()
-        if not memory_efficient:
+        if not self.memory_efficient:
             self._preload_data()
 
     def _infer_feature_columns(self) -> List[str]:
@@ -161,13 +172,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Infer feature columns from specified columns or data headers.
         """
         # Use explicitly specified columns (including targets)
-        if self._known_cols or self._num_cols or self._cat_cols or self._target_cols:
-            feature_cols = list(dict.fromkeys(self._known_cols + self._num_cols + self._cat_cols + self._target_cols))
+        if self._past_cols or self._num_cols or self._cat_cols or self._target_cols:
+            feature_cols = list(dict.fromkeys(self._past_cols + self._num_cols + self._cat_cols + self._target_cols))
             if self._enrich_cat:
                 feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
             return feature_cols
 
-        # Infer from data headers
         if self.use_dataframes:
             if not self.dataframes:
                 raise ValueError("Cannot infer feature columns: no dataframes provided")
@@ -181,7 +191,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
             except Exception as e:
                 raise ValueError(f"Could not read file {self.file_paths[0]} to infer columns: {e}")
 
-        # Exclude special columns from features
+        # Exclude special columns (weights) from features
         special_columns = {self._weights} if self._weights else set()
         feature_cols = [col for col in all_columns if col not in special_columns]
 
@@ -197,22 +207,23 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if not self._group_cols or self.global_forecasting:
             return
 
-        # For local forecasting, add group columns to categorical and known columns
+        # For local forecasting, add group columns to categorical and future columns
         for group_col in self._group_cols:
             if group_col not in self._cat_cols:
                 self._cat_cols.append(group_col)
-            if group_col not in self._known_cols:
-                self._known_cols.append(group_col)
+            if group_col not in self._past_cols:
+                self._past_cols.append(group_col)
 
     def _validate_enrich_cat(self):
-        """Validate the enrich_cat parameter and update categorical and known columns"""
+        """Validate the enrich_cat parameter and update categorical, future and past columns"""
         validate_enrich_cat(self._enrich_cat)
-
         for option in self._enrich_cat:
             if option not in self._cat_cols:
                 self._cat_cols.append(option)
-            if option not in self._known_cols:
-                self._known_cols.append(option)
+            if option not in self._future_cols:
+                self._future_cols.append(option)
+            if option not in self._past_cols:
+                self._past_cols.append(option)
 
     def _parse_and_enrich_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """
@@ -248,10 +259,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     def _enrich_temporal_features(self, dataset):
         """
-        Enrich dataset with temporal categorical features.
-
-        This method is now a wrapper around the utility function.
-        It handles the column management logic specific to this class.
+        Wrapper function to enrich dataset with temporal categorical features.
         """
         if not self._enrich_cat or self._time_col not in dataset.columns:
             return dataset
@@ -261,7 +269,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         # Handle column management (class-specific logic)
         enriched_features = [col for col in self._enrich_cat if col in dataset.columns]
 
-        # Add temporal categorical features to cat_cols and known_cols only once
+        # Add temporal categorical features to cat_cols and future_cols only once
         if enriched_features and not self._is_file_read:
             if self._cat_cols is None:
                 self._cat_cols = []
@@ -269,8 +277,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
             for feature in enriched_features:
                 if feature not in self._cat_cols:
                     self._cat_cols.append(feature)
-                if self._known_cols is not None and feature not in self._known_cols:
-                    self._known_cols.append(feature)
+                if self._future_cols is not None and feature not in self._future_cols:
+                    self._future_cols.append(feature)
 
             self._is_file_read = True
         return dataset
@@ -301,19 +309,91 @@ class MultiSourceTSDataSet(BaseD1Layer):
         return self._num_cols or []
 
     @property
-    def known_cols(self) -> Optional[List[str]]:
-        """Get the known columns."""
-        return self._known_cols or []
+    def past_cols(self) -> Optional[List[str]]:
+        """Get the past columns."""
+        return self._past_cols or []
 
     @property
-    def unknown_cols(self) -> Optional[List[str]]:
-        """Get the unknown columns."""
-        return self._unknown_cols or []
+    def future_cols(self) -> Optional[List[str]]:
+        """Get the future columns."""
+        return self._future_cols or []
 
-    def _process_dataframes(self):
+    def _data_chunk_generator(self):
         """
-        Process pandas DataFrames to extract group information and update encoders.
-        Similar to _process_files but works with in-memory DataFrames.
+        Generator that yields data chunks from either files or DataFrames.
+        Supports multiple file formats (CSV, Parquet, JSON, etc.) with custom read options.
+
+        Yields:
+            tuple: (source_idx, source_name, chunk_dataframe)
+        """
+        if self.use_dataframes:
+            # Yield entire DataFrames
+            for idx, df in enumerate(self.dataframes):
+                source_name = f"dataframe_{idx}"
+                self.file_sizes.append(len(df))
+                yield idx, source_name, df
+        else:
+            # File format reader mapping
+            reader_map = {
+                ".csv": pd.read_csv,
+                ".parquet": pd.read_parquet,
+                ".pq": pd.read_parquet,
+                ".json": pd.read_json,
+                ".jsonl": pd.read_json,
+                ".pkl": pd.read_pickle,
+                ".pickle": pd.read_pickle,
+            }
+
+            # Formats that support chunking
+            chunkable_formats = {".csv", ".json", ".jsonl"}
+
+            logger.info("Processing files to build metadata...")
+            for idx, file_path in enumerate(self.file_paths):
+                logger.info(f"Processing file {idx + 1}/{len(self.file_paths)}: {file_path}")
+
+                # Determine file format
+                _, extension = os.path.splitext(file_path)
+                extension = extension.lower()
+                reader_func = reader_map.get(extension)
+
+                if not reader_func:
+                    logger.warning(f"Unsupported file format '{extension}' for {file_path}. Skipping.")
+                    continue
+
+                # Store file size
+                file_size = os.path.getsize(file_path)
+                self.file_sizes.append(file_size)
+
+                try:
+                    # Handle chunked reading for supported formats
+                    if self.memory_efficient and extension in chunkable_formats:
+                        # Combine user options with chunksize
+                        options = {**self.read_options, "chunksize": self.chunk_size}
+
+                        # Special handling for JSON/JSONL
+                        if extension in {".json", ".jsonl"}:
+                            options.setdefault("lines", True)
+
+                        for chunk in reader_func(file_path, **options):
+                            chunk = self._parse_and_enrich_chunk(chunk)
+                            yield idx, file_path, chunk
+                    else:
+                        # Non-chunked reading (Parquet, or non-memory-efficient mode)
+                        options = self.read_options.copy()
+                        options.pop("chunksize", None)  # Remove chunksize if present
+
+                        chunk = reader_func(file_path, **options)
+                        chunk = self._parse_and_enrich_chunk(chunk)
+                        yield idx, file_path, chunk
+
+                except Exception as e:
+                    logger.error(f"Failed to read {file_path}: {e}")
+                    raise
+
+    def _process_data(self):
+        """
+        Unified entry point for processing all data sources (files or DataFrames).
+        Uses generator pattern for memory efficiency.
         """
         # Initialize data structures
         self.total_length = 0
@@ -323,101 +403,26 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.file_group_map = []
         self.file_sizes = []
 
-        # Process each DataFrame
-        for df_idx, df in enumerate(self.dataframes):
-            self.file_sizes.append(len(df))
-            file_groups = set()
-            self._process_dataframe_chunk(df, df_idx, f"dataframe_{df_idx}", file_groups)
-            self.file_group_map.append(file_groups)
+        # Track groups per source
+        source_groups_map = {}
 
-        self._group_ids = list(self.group_info.keys())
+        # Process all data sources using the generator
+        for source_idx, source_name, chunk in self._data_chunk_generator():
+            if source_idx not in source_groups_map:
+                source_groups_map[source_idx] = set()
 
-    def _process_files(self):
-        """
-        Process each file to extract group information and update encoders.
-        Builds a mapping of where each group's data is located and
-        calculates the total length of each group.
-        """
+            self._process_chunk(chunk, source_idx, source_name, source_groups_map[source_idx])
 
-        self.total_length = 0  # Total number of rows across all groups
-        self.file_info = []  # Information about each group in each file
-        self.group_info = {}  # Maps (file_idx, group_key) to their locations in files
-        self.lengths = {}  # Store the length of each group (for compatibility)
-        self.file_group_map = []  # Maps global index to (file_idx, group_key) tuples
-        self.file_sizes = []  # Store file sizes for memory management
-
-        logger.info("Processing files to build metadata...")
-        for file_idx, file_path in enumerate(self.file_paths):
-            logger.info(f"Processing file {file_idx + 1}/{len(self.file_paths)}: {file_path}")
-            file_groups = set()
-
-            file_size = os.path.getsize(file_path)  # Get file size
-            self.file_sizes.append(file_size)
-
-            if self.memory_efficient:  # Process in chunks for memory efficiency
-                for chunk in pd.read_csv(file_path, chunksize=self.chunk_size):
-                    chunk = self._parse_and_enrich_chunk(chunk)
-                    self._process_chunk(chunk, file_idx, file_path, file_groups)
-            else:  # Load entire file at once for small files
-                chunk = pd.read_csv(file_path)
-                chunk = self._parse_and_enrich_chunk(chunk)
-                self._process_chunk(chunk, file_idx, file_path, file_groups)
-
-            for file_group_key in file_groups:  # Add all groups from this file to the global mapping
+        # Build file_group_map from source_groups_map
+        for source_idx in sorted(source_groups_map.keys()):
+            for file_group_key in source_groups_map[source_idx]:
                 self.file_group_map.append(file_group_key)
 
-        # Store unique file-group combinations for iteration
+        # Store unique file-group combinations
         self._group_ids = list(self.group_info.keys())
 
-    def _process_dataframe_chunk(self, chunk, df_idx, df_name, file_groups):
-        """
-        Process a DataFrame chunk.
-        """
-
-        if len(chunk) == 0:
-            return
-
-        # Handle grouping logic based on group_cols (same as _process_chunk)
-        if not self.group_cols:
-            # No group columns - treat all data as a single group
-            chunk["_single_group"] = "_global"
-            group_col_for_groupby = "_single_group"
-        elif isinstance(self.group_cols, list) and len(self.group_cols) > 1:
-            # Create a composite key for multi-column groups
-            chunk["_composite_group_key"] = chunk[self.group_cols].apply(lambda x: tuple(x), axis=1)
-            group_col_for_groupby = "_composite_group_key"
-        elif isinstance(self.group_cols, list) and len(self.group_cols) == 1:
-            # Single group column in a list
-            group_col_for_groupby = self.group_cols[0]
-        else:
-            # Single group column case (string)
-            group_col_for_groupby = self.group_cols
-
-        # Group by the composite key
-        for group_key, group_data in chunk.groupby(group_col_for_groupby):
-            file_group_key = (df_name, group_key)
-            file_groups.add(file_group_key)
-
-            # Store group information
-            if file_group_key not in self.group_info:
-                self.group_info[file_group_key] = {
-                    "length": 0,
-                    "df_idx": df_idx,
-                    "group_key": (group_key,),
-                }
-
-                # Store original values for composite keys if needed
-                if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
-                    # For composite keys, store the original column values
-                    first_row = group_data.iloc[0]
-                    original_values = [first_row[col] for col in self.group_cols]
-                    self.group_info[file_group_key]["original_values"] = original_values
-            self.group_info[file_group_key]["length"] += len(group_data)
-            self._update_encoders(group_data)
-
-            # Add to file group map
-            for _ in range(len(group_data)):
-                self.file_group_map.append(file_group_key)
+        n_sources = len(self.file_paths if not self.use_dataframes else self.dataframes)
+        logger.info(f"Processed {len(self._group_ids)} groups from {n_sources} sources")
 
     def _process_chunk(self, chunk, file_idx, file_path, file_groups):
         """
@@ -480,24 +485,19 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
     def _update_encoders(self, data):
         """
-        Update label encoders with new categorical data.
-
-        This method is now a wrapper around the utility function.
+        A wrapper around utility function to update label encoders with new categorical data.
         """
         update_label_encoders(data, self._cat_cols, self.label_encoders, self._group_cols, self._enrich_cat)
 
     def _apply_label_encoding(self, data):
-        """Apply label encoding to categorical columns in the data.
-
-        This method is now a wrapper around the utility function.
+        """
+        A wrapper around utility function to apply label encoding to categorical columns in the data.
         """
         return apply_label_encoding(data, self._cat_cols, self.label_encoders)
 
     def _get_categorical_cardinality(self, col):
         """
-        Get the cardinality (number of unique values) for a categorical column.
-
-        This method is now a wrapper around the utility function.
+        A wrapper around utility function to get the cardinality for a categorical column.
         """
         return get_categorical_cardinality(col, self.label_encoders, self.data)
 
@@ -510,37 +510,35 @@ class MultiSourceTSDataSet(BaseD1Layer):
             group_length = self.group_info[file_group_key]["length"]
             self.cumulative_lengths.append(self.cumulative_lengths[-1] + group_length)
 
-        # Store total dataset length
         self.dataset_length = self.cumulative_lengths[-1]
 
         # Calculate feature indices
         cat_indices = [self.feature_cols.index(col) for col in (self._cat_cols or []) if col in self.feature_cols]
-        known_indices = [self.feature_cols.index(col) for col in (self._known_cols or []) if col in self.feature_cols]
-        unknown_indices = [self.feature_cols.index(col) for col in (self._unknown_cols or []) if col in self.feature_cols]
+        past_indices = [self.feature_cols.index(col) for col in (self._past_cols or []) if col in self.feature_cols]
+        future_indices = [self.feature_cols.index(col) for col in (self._future_cols or []) if col in self.feature_cols]
         target_indices = [self.feature_cols.index(col) for col in (self._target_cols or []) if col in self.feature_cols]
 
         # Prepare comprehensive metadata dictionary
         self.metadata = {
-            # Dataset dimensions (counts)
             "n_targets": len(self._target_cols),
             "n_features": len(self.feature_cols),
             "n_categorical": len(self._cat_cols),
-            "n_known": len(self.known_cols) if self.known_cols else 0,
-            "n_unknown": len(self.unknown_cols) if self.unknown_cols else 0,
+            "n_past": len(self.past_cols) if self.past_cols else 0,
+            "n_future": len(self.future_cols) if self.future_cols else 0,
             # Column names
             "target_cols": self._target_cols,
             "feature_cols": self.feature_cols,
             # Feature indices
             "idx_categorical": cat_indices,
-            "idx_known": known_indices,
-            "idx_unknown": unknown_indices,
+            "idx_past": past_indices,
+            "idx_future": future_indices,
             "idx_targets": target_indices,
             # Group information
             "n_groups": len(self._group_ids),
             # Column types and temporal information
             "time_col": self._time_col,
-            "known_cols": self.known_cols if self.known_cols else [],
-            "unknown_cols": self.unknown_cols if self.unknown_cols else [],
+            "past_cols": self.past_cols if self.past_cols else [],
+            "future_cols": self.future_cols if self.future_cols else [],
             "enrich_cat": self._enrich_cat if self._enrich_cat else [],
         }
 
@@ -548,9 +546,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if self._cat_cols and len(self._cat_cols) > 0:
             self.metadata["categorical_columns"] = self._cat_cols
 
-            # Enhanced categorical cardinality information
             cardinalities = {}
-            categorical_mappings = {}
 
             # Process all categorical columns
             for col in self._cat_cols:
@@ -569,26 +565,25 @@ class MultiSourceTSDataSet(BaseD1Layer):
                         n_categories = len(group_values)
 
                     cardinalities[col] = n_categories
-                    categorical_mappings[col] = {
-                        "categories": group_values,
-                        "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(col) if col in self.feature_cols else -1,
-                    }
 
                 # Handle regular categorical columns (non-group)
                 elif col in self.label_encoders:
                     n_categories = len(self.label_encoders[col].classes_)
-                    categories = self.label_encoders[col].classes_.tolist()
                     cardinalities[col] = n_categories
-                    categorical_mappings[col] = {
-                        "categories": categories,
-                        "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(col) if col in self.feature_cols else -1,
-                    }
 
             # Update metadata with the dictionaries
             self.metadata["categorical_cardinalities"] = cardinalities
-            self.metadata["categorical_mappings"] = categorical_mappings
+
+            # Also store as ordered lists (matching __getitem__ format)
+            cat_cols_list = []
+            cat_cardinalities = []
+            for col in self._cat_cols:
+                if col in cardinalities:
+                    cat_cols_list.append(col)
+                    cat_cardinalities.append(cardinalities[col])
+
+            self.metadata["cat_cols_list"] = cat_cols_list
+            self.metadata["cat_cardinalities"] = cat_cardinalities
 
             # Handle group mapping
             if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
@@ -634,15 +629,11 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if not hasattr(self, "metadata") or not self.metadata:
             return
 
-        # Update categorical cardinalities and mappings for enriched features
         if hasattr(self, "_enrich_cat") and self._enrich_cat:
             if "categorical_cardinalities" not in self.metadata:
                 self.metadata["categorical_cardinalities"] = {}
-            if "categorical_mappings" not in self.metadata:
-                self.metadata["categorical_mappings"] = {}
 
             cardinalities = self.metadata["categorical_cardinalities"]
-            categorical_mappings = self.metadata["categorical_mappings"]
 
             for feature in self._enrich_cat:
                 if feature in self.label_encoders:
@@ -650,22 +641,20 @@ class MultiSourceTSDataSet(BaseD1Layer):
                     n_categories = len(categories)
                     cardinalities[feature] = n_categories
 
-                    # Also update categorical_mappings
-                    categorical_mappings[feature] = {
-                        "categories": categories.tolist(),
-                        "cardinality": n_categories,
-                        "feature_index": self.feature_cols.index(feature) if feature in self.feature_cols else -1,
-                    }
-
             self.metadata["categorical_cardinalities"] = cardinalities
-            self.metadata["categorical_mappings"] = categorical_mappings
 
-            known_indices = [self.feature_cols.index(col) for col in self._known_cols if col in self.feature_cols]
-            self.metadata["idx_known"] = known_indices
-            self.metadata["n_known"] = len(self._known_cols) if self._known_cols else 0
+            past_indices = [self.feature_cols.index(col) for col in self._past_cols if col in self.feature_cols]
+            self.metadata["idx_past"] = past_indices
+            self.metadata["n_past"] = len(self._past_cols) if self._past_cols else 0
 
-            self.metadata["known_cols"] = self._known_cols.copy() if self._known_cols else []
-            self.metadata["original_known_cols"] = self._original_known_cols.copy() if self._original_known_cols else None
+            self.metadata["past_cols"] = self._past_cols.copy() if self._past_cols else []
+
+            future_indices = [self.feature_cols.index(col) for col in self._future_cols if col in self.feature_cols]
+            self.metadata["idx_future"] = future_indices
+            self.metadata["n_future"] = len(self._future_cols) if self._future_cols else 0
+
+            self.metadata["future_cols"] = self._future_cols.copy() if self._future_cols else []
+            self.metadata["original_future_cols"] = self._original_future_cols.copy() if self._original_future_cols else None
 
     def _preload_data(self):
         """Preload all data into memory for faster access (memory_efficient=False)."""
@@ -687,7 +676,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         Load data for a specific group from a DataFrame.
         """
         df_name, group_key = file_group_key
-        df_idx = self.group_info[file_group_key]["df_idx"]
+        df_idx = self.group_info[file_group_key]["file_idx"]  # Use file_idx, not df_idx
         df = self.dataframes[df_idx]
 
         if not self.group_cols:
@@ -709,8 +698,27 @@ class MultiSourceTSDataSet(BaseD1Layer):
         file_idx, group_key = file_group_key
         file_path = self.file_paths[file_idx]
 
-        # Load and preprocess entire file (parse time, enrich temporal, update encoders)
-        df = pd.read_csv(file_path)
+        # Determine file format and reader
+        _, extension = os.path.splitext(file_path)
+        extension = extension.lower()
+
+        reader_map = {
+            ".csv": pd.read_csv,
+            ".parquet": pd.read_parquet,
+            ".pq": pd.read_parquet,
+            ".json": pd.read_json,
+            ".jsonl": pd.read_json,
+            ".pkl": pd.read_pickle,
+            ".pickle": pd.read_pickle,
+        }
+
+        reader_func = reader_map.get(extension, pd.read_csv)
+
+        # Load file with user-provided options
+        options = self.read_options.copy()
+        options.pop("chunksize", None)  # Remove chunksize for full read
+
+        df = reader_func(file_path, **options)
 
         # Extract and process group data
         df = self._parse_and_enrich_chunk(df)
@@ -778,9 +786,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
             - y: Target tensor
             - metadata: Additional metadata
         """
-        if idx >= len(self._group_ids):
-            raise IndexError(f"Group index {idx} out of range. Available groups: {len(self._group_ids)}")
-
         file_group_key = self._group_ids[idx]
 
         if not self.memory_efficient and file_group_key in self.cached_data:
@@ -861,26 +866,37 @@ class MultiSourceTSDataSet(BaseD1Layer):
             # Extract time indices
             time_indices = group_data[self._time_col].tolist() if self._time_col in group_data.columns else []
 
-        # Prepare categorical information as ordered lists
+        # Prepare the group sample
+        features = x
+        targets = y
+        group_id = group_id
+        time_indices = time_indices
+        seq_len = len(group_data)
+
+        # Build cat_cols and cardinalities dynamically to include temporal enrichment
         cat_cols_list = []
         cat_cardinalities_list = []
 
-        if hasattr(self, "_cat_cols") and self._cat_cols:
-            for col in self._cat_cols:
-                if col in self.label_encoders:
-                    cat_cols_list.append(col)
-                    cat_cardinalities_list.append(len(self.label_encoders[col].classes_))
+        # Get cardinalities from metadata (includes both regular and temporal features)
+        all_cardinalities = self.metadata.get("categorical_cardinalities", {})
 
-        # Prepare the group sample
-        sample = {
-            "x": x,  # All features for this group [seq_len, n_features]
-            "y": y,  # All targets for this group [seq_len, n_targets]
-            "group_id": group_id,  # Group identifier
+        # Iterate through current _cat_cols (includes temporal enrichment)
+        for col in self._cat_cols:
+            if col in all_cardinalities:
+                cat_cols_list.append(col)
+                cat_cardinalities_list.append(all_cardinalities[col])
+            elif col in self.label_encoders:
+                # Fallback: get from label encoder if not in metadata
+                cat_cols_list.append(col)
+                cat_cardinalities_list.append(len(self.label_encoders[col].classes_))
+
+        return {
+            "x": features,
+            "y": targets,
+            "group_id": group_id,
             "past_time": time_indices,  # All time indices for this group
             "future_time": time_indices,  # Same as past_time for now
-            "seq_len": len(group_data),  # Length of the sequence
-            "cat_cols": cat_cols_list,  # Ordered list of categorical column names
-            "cat_cardinalities": cat_cardinalities_list,  # Ordered list of cardinalities (same order as cat_cols)
+            "seq_len": seq_len,  # Length of the sequence
+            "cat_cols": cat_cols_list,
+            "cat_cardinalities": cat_cardinalities_list,
         }
-
-        return sample

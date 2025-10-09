@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
-from ..scalers import Scaler
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,11 @@ class EncoderDecoderDataset(Dataset):
         self.cont_feature_cols = cont_feature_cols or []
         self.include_target_in_decoder = include_target_in_decoder
 
+        # Scaler placeholders - will be set by EncoderDecoder after fitting
+        self.feature_scaler = None
+        self.target_scaler = None
+        self.scale_targets = False
+
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
             try:
@@ -60,13 +65,6 @@ class EncoderDecoderDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
         Get a sample with encoder-decoder structure.
-
-        Args:
-            idx: Index of the window to retrieve
-
-        Returns:
-            Tuple of (input_dict, target_tensor) where input_dict contains
-            clean batch structure with only necessary keys
         """
         window = self.valid_windows[idx]
         group_idx = window["group_idx"]
@@ -81,11 +79,7 @@ class EncoderDecoderDataset(Dataset):
         idx_categorical: List[int] = list(meta.get("idx_categorical", []))
         feature_cols = meta.get("feature_cols", [])
         enrich_cat = meta.get("enrich_cat", [])
-
-        # Temporal enrichment features are  x_cat_past and x_cat_future
-
-        # Log group sample structure
-        if idx == 0:  # Only log for the first item to avoid excessive logging
+        if idx == 0:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"Group sample keys: {list(group_sample.keys())}")
                 for key, value in group_sample.items():
@@ -93,27 +87,6 @@ class EncoderDecoderDataset(Dataset):
                         logger.debug(f"  {key}: tensor of shape {tuple(value.shape)}")
                     else:
                         logger.debug(f"  {key}: {type(value)}")
-
-        # Apply scaling to group sample if needed
-        d1_scaling_method = getattr(self.d1_dataset, "scaling_method", "minmax")
-        if hasattr(self.d1_dataset, "scaling_params") and self.d1_dataset.scaling_params:
-            # Check if we need to apply scaling on-the-fly
-            memory_efficient = getattr(self.d1_dataset, "memory_efficient", False)
-
-            # For memory-efficient mode, always apply scaling on-the-fly
-            if memory_efficient:
-                feature_cols = meta.get("feature_cols", [])
-                if "x" in group_sample and len(feature_cols) > 0:
-                    group_sample["x"] = self.d1_dataset._apply_scaling_to_tensor(group_sample["x"], feature_cols)
-            # For non-memory-efficient mode with standard scaling, ensure data is scaled
-            elif d1_scaling_method == "standard":
-                # Check if the data appears to be unscaled (mean far from 0)
-                feature_cols = meta.get("feature_cols", [])
-                if "x" in group_sample and len(feature_cols) > 0:
-                    x_mean = group_sample["x"].mean().item()
-                    if abs(x_mean) > 5.0:  # If mean is far from 0, data might not be scaled
-                        logger.warning(f"Data appears unscaled (mean={x_mean:.2f}), applying standard scaling on-the-fly")
-                        group_sample["x"] = self.d1_dataset._apply_scaling_to_tensor(group_sample["x"], feature_cols)
 
         # Extract the window from the group's sequence
         past_end = start_idx + self.past_len
@@ -125,10 +98,8 @@ class EncoderDecoderDataset(Dataset):
         logger.debug(f"Extracted future_targets with shape: {tuple(future_targets.shape)}")
         x = {}
 
-        # Get additional metadata for processing
-        idx_known_future: List[int] = list(meta.get("idx_known", []))  # Use idx_known from D1
+        idx_future: List[int] = list(meta.get("idx_future", []))  # Features available in future
 
-        # For non-global forecasting, automatically include group columns in known future features
         global_forecasting = d1_metadata.get("global_forecasting", True)
         if not global_forecasting:
             group_cols = meta.get("group_cols", [])
@@ -136,16 +107,15 @@ class EncoderDecoderDataset(Dataset):
             for group_col in group_cols:
                 if group_col in feature_cols:
                     group_idx = feature_cols.index(group_col)
-                    if group_idx not in idx_known_future:
-                        idx_known_future.append(group_idx)
+                    if group_idx not in idx_future:
+                        idx_future.append(group_idx)
                         logger.debug(
-                            f"Auto-added group column '{group_col}' (idx: {group_idx}) to idx_known_future for non-global forecasting"  # noqa
+                            f"Auto-added group column '{group_col}' (idx: {group_idx}) to idx_future for non-global forecasting"
                         )
 
         idx_targets_full: List[int] = list(meta.get("idx_targets", []))
 
         # Ensure all temporal features are treated as categorical
-        # This is a safety check in case idx_categorical doesn't include them
         if enrich_cat and feature_cols:
             for temporal_feature in enrich_cat:
                 if temporal_feature in feature_cols:
@@ -171,19 +141,16 @@ class EncoderDecoderDataset(Dataset):
             x_cat_past = X_past[:, idx_categorical].long()
             x["x_cat_past"] = x_cat_past
 
-        # Known future features (split into num/cat)
+        # Future features (split into num/cat)
         if self.future_len > 0:
             # For numeric features
-            if len(idx_known_future) > 0:
-                future_num_idx = [i for i in idx_known_future if i in idx_num]
+            if len(idx_future) > 0:
+                future_num_idx = [i for i in idx_future if i in idx_num]
                 if len(future_num_idx) > 0:
                     x["x_num_future"] = X_future[:, future_num_idx].float()
 
-            # For categorical features - include temporal enrichment + known categorical features
             future_cat_indices = []
             future_cat_names = []
-
-            # Always include temporal enrichment features (they are known in advance)
             if enrich_cat and feature_cols:
                 for temporal_feature in enrich_cat:
                     if temporal_feature in feature_cols:
@@ -192,67 +159,69 @@ class EncoderDecoderDataset(Dataset):
                             future_cat_indices.append(feature_idx)
                             future_cat_names.append(temporal_feature)
 
-            # Add known categorical features from idx_known_future
-            if len(idx_known_future) > 0:
-                # Simple rule: ALL known categorical columns go to x_cat_future
-                # This includes user-specified known_cols + auto-added group_cols (for local forecasting) + temporal enrichment
-                future_cat_idx = [i for i in idx_known_future if i in idx_categorical]
+            if len(idx_future) > 0:
+                future_cat_idx = [i for i in idx_future if i in idx_categorical]
                 for idx in future_cat_idx:
                     if idx not in future_cat_indices and idx < len(feature_cols):
                         feature_name = feature_cols[idx]
                         future_cat_indices.append(idx)
                         future_cat_names.append(feature_name)
-                        logger.info(f"Including '{feature_name}' in x_cat_future (known categorical)")
+                        logger.info(f"Including '{feature_name}' in x_cat_future (future categorical)")
 
             # Create x_cat_future tensor if we have categorical features
             if len(future_cat_indices) > 0:
                 x_cat_future = X_future[:, future_cat_indices].long()
                 x["x_cat_future"] = x_cat_future
-                logger.info(f"x_cat_future shape: {tuple(x_cat_future.shape)} ({len(future_cat_indices)} features)")
+                logger.debug(f"x_cat_future shape: {tuple(x_cat_future.shape)} ({len(future_cat_indices)} features)")
             else:
-                logger.info("No categorical features for x_cat_future")
+                logger.debug("No categorical features for x_cat_future")
 
-        # Targets for decoder (future target values)
         x["y"] = future_targets.float()
-
-        # Map idx_targets (relative to full X) into positions within x_num_past
         num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
         mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
         if len(mapped_targets) == 0 and len(idx_targets_full) > 0:
             logger.warning("All targets mapped to non-numeric features; idx_target will be empty")
         x["idx_target"] = torch.tensor(mapped_targets, dtype=torch.long)
 
-        # Include target in decoder part if requested (for select models)
         if self.include_target_in_decoder and self.future_len > 0:
             x["decoder_target"] = future_targets.float()
 
-        # CORRECTED LOGIC: Handle group_id based on global_forecasting setting
-        # When global_forecasting=True: group_id as separate batch key
-        # When global_forecasting=False: group_id treated as categorical feature (not separate batch key)
         global_forecasting = d1_metadata.get("global_forecasting", True)
 
         if global_forecasting:
-            # Global forecasting: add group_id as separate batch key
             group_id = window.get("group_id", 0)
-            # Handle different group_id types
             if isinstance(group_id, str):
-                # Convert string group_id to integer using group mapping if available
                 meta_group_mapping = meta.get("group_mapping", {})
                 group_id = meta_group_mapping.get(group_id, 0)
                 x["group_id"] = int(group_id)
             elif isinstance(group_id, (int, float)):
                 x["group_id"] = int(group_id)
             else:
-                # For tuple or other types, keep as is
                 x["group_id"] = group_id
-        # For local forecasting (global_forecasting=False), group_id is NOT added as separate batch key
-        # It's already included in x_cat_past and x_cat_future as a categorical feature
-
-        # Use actual start index from window for debugging (trace back to original CSV)
-        x["time_idx"] = start_idx  # Actual start index in original data for debugging
-
-        # Target tensor (for loss computation)
+        x["time_idx"] = start_idx
         y = future_targets
+
+        # Apply scaling on-the-fly if scaler is fitted
+        # Works for both memory_efficient=True and False modes
+        if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
+            # Scale x_num_past
+            if "x_num_past" in x and x["x_num_past"].numel() > 0:
+                x_num_past_np = x["x_num_past"].numpy()
+                x_num_past_scaled = self.feature_scaler.transform(x_num_past_np)
+                x["x_num_past"] = torch.from_numpy(x_num_past_scaled).float()
+
+            # Scale x_num_future (if present)
+            if "x_num_future" in x and x["x_num_future"].numel() > 0:
+                x_num_future_np = x["x_num_future"].numpy()
+                x_num_future_scaled = self.feature_scaler.transform(x_num_future_np)
+                x["x_num_future"] = torch.from_numpy(x_num_future_scaled).float()
+
+        # Apply target scaling if enabled
+        if self.scale_targets and self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
+            y_np = y.numpy()
+            y_scaled = self.target_scaler.transform(y_np)
+            y = torch.from_numpy(y_scaled).float()
+            x["y"] = y  # Update y in x dict as well
 
         return x, y
 
@@ -295,7 +264,7 @@ class EncoderDecoder(pl.LightningDataModule):
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
         include_target_in_decoder: bool = False,
-        scaling_method: str = "standard",
+        scaling_method: Optional[str] = None,
         scale_targets: bool = False,
     ):
         """
@@ -316,11 +285,16 @@ class EncoderDecoder(pl.LightningDataModule):
             max_samples_per_group: Maximum samples per group
             precompute: Whether to precompute valid windows
             include_target_in_decoder: If True, include target in decoder part (for some models)
-            scaling_method: Method for manual scaling ("standard" or "minmax", default: "standard")
-                          Scaling is applied ONLY on training data to prevent data leakage
-                          Supports both memory_efficient=True/False modes from D1 layer
+            scaling_method: Scaling method string ("standard" or "minmax" or None)
+                          Scaling workflow:
+                          1. User provides scaling_method string
+                          2. Scaler fitted on training data after split_data()
+                             - If memory_efficient=True: Uses partial_fit on chunks
+                             - If memory_efficient=False: Uses fit on all training data
+                          3. Transformation:
+                             - If memory_efficient=True: Applied on-the-fly in __getitem__()
+                             - If memory_efficient=False: Pre-applied to all splits after fitting
             scale_targets: If True, also scale target variables (default: False)
-                          Target scaling is also fitted only on training data
         """
         super().__init__()
 
@@ -340,13 +314,24 @@ class EncoderDecoder(pl.LightningDataModule):
         self.scale_targets = scale_targets
         self.scaling_method = scaling_method
 
-        # Initialize manual scaling
-        self._scaler = Scaler(scaling_method=scaling_method, scale_targets=scale_targets)
+        # Initialize scikit-learn scalers directly
+        if scaling_method == "standard":
+            self.feature_scaler = StandardScaler()
+            self.target_scaler = StandardScaler() if scale_targets else None
+        elif scaling_method == "minmax":
+            self.feature_scaler = MinMaxScaler()
+            self.target_scaler = MinMaxScaler() if scale_targets else None
+        elif scaling_method is None or scaling_method == "none":
+            self.feature_scaler = None
+            self.target_scaler = None
+        else:
+            raise ValueError(f"Unknown scaling method: {scaling_method}. Use 'standard', 'minmax', or None.")
+
         self.is_scaler_fitted = False
 
         # Extract column information from D1 dataset
-        self.known_cols = d1_dataset.known_cols
-        self.unknown_cols = d1_dataset.unknown_cols
+        self.past_cols = d1_dataset.past_cols
+        self.future_cols = d1_dataset.future_cols
         self.group_cols = d1_dataset.group_cols or []
         self.target_cols = d1_dataset.target_cols
         self.feature_cols = d1_dataset.feature_cols
@@ -382,9 +367,6 @@ class EncoderDecoder(pl.LightningDataModule):
             include_target_in_decoder=include_target_in_decoder,
         )
 
-        # Store reference to D2 layer in dataset for scaling access
-        self.dataset.d2_layer = self
-
         # Create datasets if precompute is True
         if precompute:
             self.train_dataset = None
@@ -411,25 +393,134 @@ class EncoderDecoder(pl.LightningDataModule):
     def fit_scaler(self, dataset):
         """
         Fit the scaler on numeric features from the given dataset.
+        Uses batches for efficiency in both partial_fit and fit modes.
 
         Args:
             dataset: Training dataset to fit the scaler on
         """
-        self._scaler.fit_scaler(dataset)
-        self.is_scaler_fitted = self._scaler.is_scaler_fitted
+        if self.feature_scaler is None:
+            logger.info("No scaling method specified, skipping scaler fitting")
+            return
 
-    def transform_with_scaler(self, dataset):
-        """
-        Transform the numeric features in the dataset using the fitted scaler.
-        """
-        return self._scaler.transform_with_scaler(dataset)
+        import numpy as np
+        from torch.utils.data import DataLoader
+
+        from .utils import custom_collate_fn
+
+        # Use DataLoader for efficient batch processing
+        # Larger batch size improves performance
+        dataloader = DataLoader(dataset, batch_size=64, shuffle=False, collate_fn=custom_collate_fn)
+
+        use_partial_fit = getattr(self.d1_dataset, "memory_efficient", False)
+
+        if use_partial_fit:
+            logger.info(f"Fitting {self.scaling_method} scaler using partial_fit (memory-efficient mode)...")
+
+            for batch in dataloader:
+                # Batch is a dictionary with batched tensors
+
+                # Combine past and future numeric features for fitting
+                numeric_features_batch = []
+                if "x_num_past" in batch and batch["x_num_past"].numel() > 0:
+                    numeric_features_batch.append(batch["x_num_past"])
+                if "x_num_future" in batch and batch["x_num_future"].numel() > 0:
+                    numeric_features_batch.append(batch["x_num_future"])
+
+                # Fit feature scaler on the combined batch
+                if numeric_features_batch:
+                    # Shape: (batch_size, seq_len, num_features) -> (batch_size * seq_len, num_features)
+                    combined_features = torch.cat(numeric_features_batch, dim=1)
+                    features_np = combined_features.reshape(-1, combined_features.shape[-1]).numpy()
+                    if features_np.size > 0:
+                        self.feature_scaler.partial_fit(features_np)
+
+                # Fit target scaler if requested
+                if self.scale_targets and self.target_scaler is not None:
+                    if "y" in batch and batch["y"].numel() > 0:
+                        targets_np = batch["y"].reshape(-1, batch["y"].shape[-1]).numpy()
+                        self.target_scaler.partial_fit(targets_np)
+
+            logger.info(f"Scaler fitted successfully on {len(dataset)} samples using partial_fit")
+
+        else:  # Batch mode (fit)
+            logger.info(f"Fitting {self.scaling_method} scaler on training data (batch mode)...")
+
+            all_features_list = []
+            all_targets_list = []
+
+            for batch in dataloader:
+                # Combine past and future numeric features
+                numeric_features_batch = []
+                if "x_num_past" in batch and batch["x_num_past"].numel() > 0:
+                    numeric_features_batch.append(batch["x_num_past"])
+                if "x_num_future" in batch and batch["x_num_future"].numel() > 0:
+                    numeric_features_batch.append(batch["x_num_future"])
+
+                if numeric_features_batch:
+                    combined_features = torch.cat(numeric_features_batch, dim=1)
+                    all_features_list.append(combined_features.numpy())
+
+                if self.scale_targets and "y" in batch and batch["y"].numel() > 0:
+                    all_targets_list.append(batch["y"].numpy())
+
+            # Fit feature scaler on all collected data
+            if all_features_list:
+                features_array = np.concatenate(all_features_list, axis=0)
+                features_array = features_array.reshape(-1, features_array.shape[-1])
+                self.feature_scaler.fit(features_array)
+                logger.info(
+                    f"Feature scaler fitted on {features_array.shape[0]} total timesteps with {features_array.shape[1]} features"
+                )
+
+            # Fit target scaler
+            if self.scale_targets and self.target_scaler and all_targets_list:
+                targets_array = np.concatenate(all_targets_list, axis=0)
+                targets_array = targets_array.reshape(-1, targets_array.shape[-1])
+                self.target_scaler.fit(targets_array)
+                logger.info(
+                    f"Target scaler fitted on {targets_array.shape[0]} total timesteps with {targets_array.shape[1]} targets"
+                )
+
+        self.is_scaler_fitted = True
 
     def apply_inverse_scaling(self, data, data_type="features"):
         """
-        Apply inverse scaling to denormalize predictions using manual scaling parameters.
+        Apply inverse scaling to denormalize predictions.
 
+        Args:
+            data: Data to inverse transform (numpy array or torch tensor)
+            data_type: Type of data ('features' or 'targets')
+
+        Returns:
+            Inverse transformed data in the same format as input
         """
-        return self._scaler.apply_inverse_scaling(data, data_type)
+        if not self.is_scaler_fitted:
+            logger.warning("Scaler not fitted, returning original data")
+            return data
+
+        # Select appropriate scaler
+        if data_type == "targets" and self.target_scaler:
+            scaler = self.target_scaler
+        elif data_type == "features" and self.feature_scaler:
+            scaler = self.feature_scaler
+        else:
+            logger.warning(f"No scaler available for data_type='{data_type}', returning original data")
+            return data
+
+        # Convert to numpy if needed
+        is_tensor = isinstance(data, torch.Tensor)
+        if is_tensor:
+            data_np = data.detach().cpu().numpy()
+        else:
+            data_np = data
+
+        # Apply inverse transform
+        data_inverse = scaler.inverse_transform(data_np)
+
+        # Convert back to tensor if input was tensor
+        if is_tensor:
+            return torch.from_numpy(data_inverse).float()
+        return data_inverse
 
     def _build_valid_windows(self):
         """Build valid sliding windows from the D1 dataset."""
@@ -496,6 +587,34 @@ class EncoderDecoder(pl.LightningDataModule):
         else:
             raise ValueError(f"Unknown split method: {self.split_method}")
 
+    def _apply_scaling_to_splits(self, train_dataset, val_dataset, test_dataset):
+        """
+        Fit scaler on training data and attach to dataset for on-the-fly transformation.
+
+        This unified approach works for both memory_efficient=True and False modes.
+        Transformation happens on-the-fly in EncoderDecoderDataset.__getitem__().
+
+        Args:
+            train_dataset: Training dataset
+            val_dataset: Validation dataset
+            test_dataset: Test dataset
+
+        Returns:
+            Tuple of (train_dataset, val_dataset, test_dataset)
+        """
+        # Step 1: Fit scaler on training data only (no data leakage)
+        self.fit_scaler(train_dataset)
+
+        # Step 2: Attach fitted scalers to the main dataset instance
+        # This makes them available to all subsets (train, val, test)
+        if self.is_scaler_fitted:
+            logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
+            self.dataset.feature_scaler = self.feature_scaler
+            self.dataset.target_scaler = self.target_scaler
+            self.dataset.scale_targets = self.scale_targets
+
+        return train_dataset, val_dataset, test_dataset
+
     def split_data(
         self,
         train_ratio: float = 0.7,
@@ -538,34 +657,22 @@ class EncoderDecoder(pl.LightningDataModule):
         val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
         test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
-        # Fit scaler on training data only
-        self.fit_scaler(train_dataset)
-
-        # Apply scaler to all datasets if fitted
-        if self.is_scaler_fitted:
-            train_dataset = self.transform_with_scaler(train_dataset)
-            val_dataset = self.transform_with_scaler(val_dataset)
-            test_dataset = self.transform_with_scaler(test_dataset)
-
-        return (train_dataset, val_dataset, test_dataset)
+        # Apply scaling using consolidated method
+        return self._apply_scaling_to_splits(train_dataset, val_dataset, test_dataset)
 
     def setup(self, stage=None):
-        """Set up datasets for training, validation, and testing."""
+        """Set up datasets for training, validation, and testing (PyTorch Lightning compatibility)."""
         if self.train_dataset is None and self.split_config:
             train_indices, val_indices, test_indices = self._create_splits(self.split_config)
 
-            self.train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
-            self.val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
-            self.test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
+            train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
+            val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
+            test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
-            # Fit scaler on training data only
-            self.fit_scaler(self.train_dataset)
-
-            # Apply scaler to all datasets if fitted
-            if self.is_scaler_fitted:
-                self.train_dataset = self.transform_with_scaler(self.train_dataset)
-                self.val_dataset = self.transform_with_scaler(self.val_dataset)
-                self.test_dataset = self.transform_with_scaler(self.test_dataset)
+            # Apply scaling using consolidated method
+            self.train_dataset, self.val_dataset, self.test_dataset = self._apply_scaling_to_splits(
+                train_dataset, val_dataset, test_dataset
+            )
 
     def train_dataloader(self):
         """Return the training dataloader."""
