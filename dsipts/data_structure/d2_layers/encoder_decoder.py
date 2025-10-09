@@ -14,6 +14,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
+from .utils import custom_collate_fn
 
 logger = logging.getLogger(__name__)
 
@@ -403,9 +404,6 @@ class EncoderDecoder(pl.LightningDataModule):
             return
 
         import numpy as np
-        from torch.utils.data import DataLoader
-
-        from .utils import custom_collate_fn
 
         # Use DataLoader for efficient batch processing
         # Larger batch size improves performance
@@ -676,7 +674,6 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def train_dataloader(self):
         """Return the training dataloader."""
-        from .utils import custom_collate_fn
 
         if self.train_dataset is None:
             self.train_dataset = EncoderDecoderSubset(self.dataset, list(range(len(self.valid_windows))))
@@ -694,7 +691,6 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def val_dataloader(self):
         """Return the validation dataloader."""
-        from .utils import custom_collate_fn
 
         if self.val_dataset is None or len(self.val_dataset) == 0:
             return None
@@ -709,7 +705,6 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def test_dataloader(self):
         """Return the test dataloader."""
-        from .utils import custom_collate_fn
 
         if self.test_dataset is None or len(self.test_dataset) == 0:
             return None
