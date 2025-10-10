@@ -117,6 +117,37 @@ class TestD1Basic:
         assert sample["x"].shape[0] == sample["seq_len"]
         logger.info(f"✓ Sample: x={sample['x'].shape}, y={sample['y'].shape}")
 
+    def test_explicit_metadata_and_getitem_dump(self, basic_csv_data):
+        """Explicitly print all D1 metadata and getitem output for inspection."""
+        d1 = MultiSourceTSDataSet(**basic_csv_data, enrich_cat=["hour", "dow"])
+
+        print("\n" + "=" * 100)
+        print("D1 METADATA COMPLETE DUMP:")
+        print("=" * 100)
+        print(d1.metadata)
+        print("=" * 100)
+
+        sample = d1[0]
+        print("\n" + "=" * 100)
+        print("D1 __GETITEM__[0] COMPLETE DUMP:")
+        print("=" * 100)
+        print(sample)
+        print("=" * 100)
+
+        # Also print individual keys for clarity
+        print("\nD1 __GETITEM__[0] DETAILED BREAKDOWN:")
+        for key, value in sample.items():
+            print(f"\n{key}:")
+            print(f"  Type: {type(value)}")
+            if hasattr(value, "shape"):
+                print(f"  Shape: {value.shape}")
+                print(f"  Dtype: {value.dtype}")
+                print(f"  Value:\n{value}")
+            else:
+                print(f"  Value: {value}")
+
+        logger.info("✓ Explicit metadata and getitem dump completed")
+
 
 class TestD1CategoricalInfo:
     """Test categorical information as ordered lists."""

@@ -79,9 +79,10 @@ def analyze_d1_metadata(d1_dataset, test_name):
     print_subsection(f"D1 Metadata Analysis: {test_name}")
 
     # Get metadata if available
-    metadata = d1_dataset.get_metadata() if hasattr(d1_dataset, "get_metadata") else {}
+    metadata = d1_dataset.metadata if hasattr(d1_dataset, "metadata") else {}
 
     group_ids = d1_dataset._group_ids if hasattr(d1_dataset, "_group_ids") else []
+
     logger.info(f"Number of groups: {len(group_ids)}")
     logger.info(f"Group IDs: {group_ids[:5]}{'...' if len(group_ids) > 5 else ''}")
     logger.info(f"Total samples: {len(d1_dataset)}")
@@ -107,30 +108,146 @@ def analyze_d1_metadata(d1_dataset, test_name):
     if hasattr(d1_dataset, "cardinality"):
         logger.info(f"Categorical cardinalities: {d1_dataset.cardinality}")
 
-    # Show all metadata keys
+    # Show ALL metadata keys and values in organized sections
     if metadata:
-        logger.info(f"\nMetadata keys: {list(metadata.keys())}")
+        logger.info(f"\n{'='*80}")
+        logger.info("COMPLETE METADATA DUMP (ORGANIZED BY CATEGORY):")
+        logger.info(f"{'='*80}")
+
+        # Section 1: Basic Info
+        logger.info("\n[BASIC INFO]")
+        for key in ["n_targets", "n_features", "n_categorical", "n_groups", "total_samples", "n_files", "n_file_groups"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 2: Column Information
+        logger.info("\n[COLUMN INFORMATION]")
+        for key in ["time_col", "target_cols", "feature_cols", "categorical_columns", "enrich_cat"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 3: Categorical Details
+        logger.info("\n[CATEGORICAL DETAILS]")
+        for key in ["cat_cols_list", "cat_cardinalities", "idx_categorical"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 4: Past/Future Configuration
+        logger.info("\n[PAST/FUTURE CONFIGURATION]")
+        for key in ["n_past", "n_future", "past_cols", "future_cols", "original_future_cols", "idx_past", "idx_future"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 5: Target Information
+        logger.info("\n[TARGET INFORMATION]")
+        for key in ["idx_targets"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 6: Group Mapping
+        logger.info("\n[GROUP MAPPING]")
+        for key in ["group_mapping", "reverse_mapping"]:
+            if key in metadata:
+                value = metadata[key]
+                if isinstance(value, dict) and len(value) <= 5:
+                    logger.info(f"  {key}: {value}")
+                elif isinstance(value, dict):
+                    logger.info(f"  {key}: dict with {len(value)} entries")
+                    logger.info(f"    Sample (first 3): {dict(list(value.items())[:3])}")
+                else:
+                    logger.info(f"  {key}: {value}")
+
+        # Section 7: Configuration Flags
+        logger.info("\n[CONFIGURATION FLAGS]")
+        for key in ["memory_efficient", "global_forecasting"]:
+            if key in metadata:
+                logger.info(f"  {key}: {metadata[key]}")
+
+        # Section 8: File Paths
+        logger.info("\n[FILE PATHS]")
+        if "file_paths" in metadata:
+            logger.info(f"  file_paths: {metadata['file_paths']}")
+
+        # Section 9: Any remaining keys
+        shown_keys = {
+            "n_targets",
+            "n_features",
+            "n_categorical",
+            "n_groups",
+            "total_samples",
+            "n_files",
+            "n_file_groups",
+            "time_col",
+            "target_cols",
+            "feature_cols",
+            "categorical_columns",
+            "enrich_cat",
+            "cat_cols_list",
+            "cat_cardinalities",
+            "idx_categorical",
+            "n_past",
+            "n_future",
+            "past_cols",
+            "future_cols",
+            "original_future_cols",
+            "idx_past",
+            "idx_future",
+            "idx_targets",
+            "group_mapping",
+            "reverse_mapping",
+            "memory_efficient",
+            "global_forecasting",
+            "file_paths",
+        }
+        remaining_keys = set(metadata.keys()) - shown_keys
+        if remaining_keys:
+            logger.info("\n[OTHER METADATA]")
+            for key in sorted(remaining_keys):
+                value = metadata[key]
+                if isinstance(value, (list, tuple)) and len(value) > 10:
+                    logger.info(f"  {key}: {type(value).__name__} with {len(value)} items (first 5: {value[:5]})")
+                elif isinstance(value, dict) and len(value) > 10:
+                    logger.info(f"  {key}: dict with {len(value)} keys (sample: {dict(list(value.items())[:3])})")
+                else:
+                    logger.info(f"  {key}: {value}")
+
+        logger.info(f"\n{'='*80}")
 
 
 def analyze_d1_getitem(d1_dataset, test_name, sample_idx=0):
-    """Analyze and log D1 layer __getitem__ output."""
     print_subsection(f"D1 GetItem Analysis: {test_name} (Sample {sample_idx})")
 
     sample = d1_dataset[sample_idx]
 
     logger.info(f"Sample keys: {list(sample.keys())}")
-    logger.info("\nSample structure:")
+
+    logger.info(f"\n{'='*80}")
+    logger.info("COMPLETE D1 __GETITEM__ OUTPUT:")
+    logger.info(f"{'='*80}")
 
     for key, value in sample.items():
         if hasattr(value, "shape"):
-            logger.info(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+            logger.info(f"  {key}:")
+            logger.info(f"    shape: {value.shape}")
+            logger.info(f"    dtype: {value.dtype}")
+            if value.numel() <= 50:  # Print small tensors
+                logger.info(f"    values: {value}")
+            else:
+                logger.info(f"    values (first 10): {value.flatten()[:10]}")
         elif isinstance(value, (list, tuple)):
-            logger.info(f"  {key}: length={len(value)}, type={type(value).__name__}")
-            # Show cardinalities if available
-            if key == "cat_cardinalities" and len(value) > 0:
-                logger.info(f"    Cardinalities: {value}")
+            logger.info(f"  {key}:")
+            logger.info(f"    type: {type(value).__name__}")
+            logger.info(f"    length: {len(value)}")
+            if len(value) <= 20:
+                logger.info(f"    values: {value}")
+            else:
+                logger.info(f"    values (first 10): {value[:10]}")
+        elif isinstance(value, dict):
+            logger.info(f"  {key}: {value}")
         else:
             logger.info(f"  {key}: {value}")
+
+    logger.info(f"{'='*80}")
 
 
 def analyze_d2_metadata(d2_dataset, test_name):
@@ -167,17 +284,41 @@ def analyze_d2_getitem(d2_dataset, test_name, sample_idx=0):
 
     x, y = d2_dataset.dataset[sample_idx]
 
+    logger.info(f"\n{'='*80}")
+    logger.info("COMPLETE D2 __GETITEM__ OUTPUT:")
+    logger.info(f"{'='*80}")
+
     logger.info(f"Input (x) keys: {list(x.keys())}")
-    logger.info("\nInput structure:")
+    logger.info("\nInput (x) structure:")
     for key, value in x.items():
         if hasattr(value, "shape"):
-            logger.info(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+            logger.info(f"  {key}:")
+            logger.info(f"    shape: {value.shape}")
+            logger.info(f"    dtype: {value.dtype}")
+            if value.numel() <= 50:  # Print small tensors
+                logger.info(f"    values:\n{value}")
+            else:
+                logger.info(f"    values (first 20): {value.flatten()[:20]}")
         elif isinstance(value, (list, tuple)):
-            logger.info(f"  {key}: length={len(value)}")
+            logger.info(f"  {key}:")
+            logger.info(f"    type: {type(value).__name__}")
+            logger.info(f"    length: {len(value)}")
+            if len(value) <= 20:
+                logger.info(f"    values: {value}")
+            else:
+                logger.info(f"    values (first 10): {value[:10]}")
         else:
             logger.info(f"  {key}: {value}")
 
-    logger.info(f"\nTarget (y): shape={y.shape}, dtype={y.dtype}")
+    logger.info("\nTarget (y):")
+    logger.info(f"  shape: {y.shape}")
+    logger.info(f"  dtype: {y.dtype}")
+    if y.numel() <= 50:
+        logger.info(f"  values:\n{y}")
+    else:
+        logger.info(f"  values (first 20): {y.flatten()[:20]}")
+
+    logger.info(f"{'='*80}")
 
 
 def analyze_scaling_statistics(df, feature_cols, target_cols, test_name):

@@ -546,42 +546,34 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if self._cat_cols and len(self._cat_cols) > 0:
             self.metadata["categorical_columns"] = self._cat_cols
 
-            cardinalities = {}
+            # Build ordered lists of cat columns and their cardinalities
+            cat_cols_list = []
+            cat_cardinalities = []
 
-            # Process all categorical columns
+            # Process all categorical columns in order
             for col in self._cat_cols:
                 # Handle group columns
                 if col in self.group_cols and hasattr(self, "group_info") and self.group_info:
                     if col in self.label_encoders:
                         n_categories = len(self.label_encoders[col].classes_)
-                        group_values = self.label_encoders[col].classes_.tolist()
                     else:
                         group_values = set()
                         for group_key, info in self.group_info.items():
                             if "original_values" in info and info["group_columns"] == self.group_cols:
                                 if len(info["original_values"]) == 1:
                                     group_values.add(str(info["original_values"][0]))
-                        group_values = sorted(list(group_values))
-                        n_categories = len(group_values)
+                        n_categories = len(sorted(list(group_values)))
 
-                    cardinalities[col] = n_categories
+                    cat_cols_list.append(col)
+                    cat_cardinalities.append(n_categories)
 
                 # Handle regular categorical columns (non-group)
                 elif col in self.label_encoders:
                     n_categories = len(self.label_encoders[col].classes_)
-                    cardinalities[col] = n_categories
-
-            # Update metadata with the dictionaries
-            self.metadata["categorical_cardinalities"] = cardinalities
-
-            # Also store as ordered lists (matching __getitem__ format)
-            cat_cols_list = []
-            cat_cardinalities = []
-            for col in self._cat_cols:
-                if col in cardinalities:
                     cat_cols_list.append(col)
-                    cat_cardinalities.append(cardinalities[col])
+                    cat_cardinalities.append(n_categories)
 
+            # Store as ordered lists (matching __getitem__ format)
             self.metadata["cat_cols_list"] = cat_cols_list
             self.metadata["cat_cardinalities"] = cat_cardinalities
 
@@ -630,18 +622,19 @@ class MultiSourceTSDataSet(BaseD1Layer):
             return
 
         if hasattr(self, "_enrich_cat") and self._enrich_cat:
-            if "categorical_cardinalities" not in self.metadata:
-                self.metadata["categorical_cardinalities"] = {}
-
-            cardinalities = self.metadata["categorical_cardinalities"]
+            # Update cat_cols_list and cat_cardinalities to include temporal features
+            cat_cols_list = list(self.metadata.get("cat_cols_list", []))
+            cat_cardinalities = list(self.metadata.get("cat_cardinalities", []))
 
             for feature in self._enrich_cat:
-                if feature in self.label_encoders:
+                if feature in self.label_encoders and feature not in cat_cols_list:
                     categories = self.label_encoders[feature].classes_
                     n_categories = len(categories)
-                    cardinalities[feature] = n_categories
+                    cat_cols_list.append(feature)
+                    cat_cardinalities.append(n_categories)
 
-            self.metadata["categorical_cardinalities"] = cardinalities
+            self.metadata["cat_cols_list"] = cat_cols_list
+            self.metadata["cat_cardinalities"] = cat_cardinalities
 
             past_indices = [self.feature_cols.index(col) for col in self._past_cols if col in self.feature_cols]
             self.metadata["idx_past"] = past_indices
