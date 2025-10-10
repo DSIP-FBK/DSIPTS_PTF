@@ -481,6 +481,14 @@ class EncoderDecoder(pl.LightningDataModule):
 
         self.is_scaler_fitted = True
 
+        # Attach fitted scalers to the main dataset for on-the-fly transformation
+        # This ensures scaling works even when fit_scaler is called directly (not via split_data)
+        if self.is_scaler_fitted:
+            logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
+            self.dataset.feature_scaler = self.feature_scaler
+            self.dataset.target_scaler = self.target_scaler
+            self.dataset.scale_targets = self.scale_targets
+
     def apply_inverse_scaling(self, data, data_type="features"):
         """
         Apply inverse scaling to denormalize predictions.
