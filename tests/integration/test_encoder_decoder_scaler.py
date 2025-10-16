@@ -122,15 +122,11 @@ def test_standard_scaler():
         batch_size=16,
         scaling_method="standard",
         scale_targets=False,
-    )
-
-    # Split data
-    train_dataset, val_dataset, test_dataset = d2_dataset.split_data(
-        train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, method="temporal"
+        split_config=(0.7, 0.15, 0.15),
     )
 
     # Check that the scaler is fitted
-    assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after split_data"
+    assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after setup"
 
     # Verify scaler parameters match the original data statistics
     # The scaler should have been fitted on the training data only
@@ -163,9 +159,9 @@ def test_standard_scaler():
     logger.info(f"\nScaler Parameters:\n{table}")
 
     # Get a batch from each dataset
-    train_sample, _ = train_dataset[0]
-    val_sample, _ = val_dataset[0]
-    test_sample, _ = test_dataset[0]
+    train_sample, _ = d2_dataset.train_dataset[0]
+    val_sample, _ = d2_dataset.val_dataset[0]
+    test_sample, _ = d2_dataset.test_dataset[0]
 
     # Check that numeric features are scaled
     train_features = train_sample["x_num_past"].numpy()
@@ -256,18 +252,16 @@ def test_custom_scaler():
         scale_targets=False,
     )
 
-    # Split data
-    train_dataset, val_dataset, test_dataset = d2_dataset.split_data(
-        train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, method="temporal"
-    )
+    # Setup with split config
+    d2_dataset.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
     # Check that the scaler is fitted
-    assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after split_data"
+    assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after setup"
 
     # Get a batch from each dataset
-    train_sample, _ = train_dataset[0]
-    val_sample, _ = val_dataset[0]
-    test_sample, _ = test_dataset[0]
+    train_sample, _ = d2_dataset.train_dataset[0]
+    val_sample, _ = d2_dataset.val_dataset[0]
+    test_sample, _ = d2_dataset.test_dataset[0]
 
     # Check that numeric features are scaled
     train_features = train_sample["x_num_past"].numpy()
@@ -355,13 +349,11 @@ def test_target_scaling():
         scale_targets=True,
     )
 
-    # Split data
-    train_dataset, val_dataset, test_dataset = d2_dataset.split_data(
-        train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, method="temporal"
-    )
+    # Setup with split config
+    d2_dataset.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
     # Check that both scalers are fitted
-    assert d2_dataset.is_scaler_fitted, "Feature scaler should be fitted after split_data"
+    assert d2_dataset.is_scaler_fitted, "Feature scaler should be fitted after setup"
     assert hasattr(d2_dataset, "target_scaler"), "Target scaler should be created"
 
     # Log feature scaler metadata
@@ -414,9 +406,9 @@ def test_target_scaling():
     logger.info(f"\nTarget Scaler Parameters:\n{target_table}")
 
     # Get a batch from each dataset
-    train_sample, train_target = train_dataset[0]
-    val_sample, val_target = val_dataset[0]
-    test_sample, test_target = test_dataset[0]
+    train_sample, train_target = d2_dataset.train_dataset[0]
+    val_sample, val_target = d2_dataset.val_dataset[0]
+    test_sample, test_target = d2_dataset.test_dataset[0]
 
     # Check that targets are scaled
     train_targets = train_target.numpy()

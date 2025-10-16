@@ -207,3 +207,40 @@ def create_random_splits(
     test_indices = indices[train_size + val_size :]
 
     return train_indices, val_indices, test_indices
+
+
+class PreTransformedDataset:
+    """
+    Wrapper for pre-transformed datasets.
+
+    This class caches transformed samples for faster access when memory_efficient=False.
+    Instead of transforming data on-the-fly in __getitem__(), all data is transformed
+    once upfront and stored in memory.
+
+    Trade-off: Uses more memory but provides faster inference.
+    """
+
+    def __init__(self, transformed_samples: List[Tuple[Dict[str, Any], torch.Tensor]]):
+        """
+        Initialize with pre-transformed samples.
+
+        Args:
+            transformed_samples: List of (x, y) tuples where x is dict and y is tensor
+        """
+        self.samples = transformed_samples
+
+    def __len__(self):
+        """Return the number of samples."""
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+        """
+        Get a pre-transformed sample.
+
+        Args:
+            idx: Sample index
+
+        Returns:
+            Tuple of (x, y) where x is dict and y is tensor
+        """
+        return self.samples[idx]

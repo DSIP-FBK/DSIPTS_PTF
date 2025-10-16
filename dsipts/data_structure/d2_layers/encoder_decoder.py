@@ -279,23 +279,15 @@ class EncoderDecoder(pl.LightningDataModule):
             step_size: Step size for sliding window
             min_valid_length: Minimum required length for a valid window
             split_method: Method for splitting data ('percentage' or 'group')
-            split_config: Configuration for splits
+            split_config: Tuple (train_ratio, val_ratio, test_ratio) for data splitting
             num_workers: Number of workers for dataloaders
             sampler: Optional sampler for training dataloader
             target_normalizer: Optional normalizer for targets
             max_samples_per_group: Maximum samples per group
-            precompute: Whether to precompute valid windows
-            include_target_in_decoder: If True, include target in decoder part (for some models)
-            scaling_method: Scaling method string ("standard" or "minmax" or None)
-                          Scaling workflow:
-                          1. User provides scaling_method string
-                          2. Scaler fitted on training data after split_data()
-                             - If memory_efficient=True: Uses partial_fit on chunks
-                             - If memory_efficient=False: Uses fit on all training data
-                          3. Transformation:
-                             - If memory_efficient=True: Applied on-the-fly in __getitem__()
-                             - If memory_efficient=False: Pre-applied to all splits after fitting
-            scale_targets: If True, also scale target variables (default: False)
+            precompute: if True, build valid windows in __init__ (default: True)
+            include_target_in_decoder: if True include target in decoder part
+            scaling_method: Scaling method ("standard" or "minmax" or None)
+            scale_targets: if True, also scale target variables (default: False)
         """
         super().__init__()
 
@@ -329,6 +321,10 @@ class EncoderDecoder(pl.LightningDataModule):
             raise ValueError(f"Unknown scaling method: {scaling_method}. Use 'standard', 'minmax', or None.")
 
         self.is_scaler_fitted = False
+
+        # Memory efficiency mode - read from D1 dataset
+        self.memory_efficient = getattr(self.d1_dataset, "memory_efficient", True)
+        logger.info(f"Memory efficient mode: {self.memory_efficient}")
 
         # Extract column information from D1 dataset
         self.past_cols = d1_dataset.past_cols
@@ -368,28 +364,18 @@ class EncoderDecoder(pl.LightningDataModule):
             include_target_in_decoder=include_target_in_decoder,
         )
 
-        # Create datasets if precompute is True
-        if precompute:
-            self.train_dataset = None
-            self.val_dataset = None
-            self.test_dataset = None
+        # Initialize dataset splits as None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
 
-            if self.split_config:
-                train_indices, val_indices, test_indices = self._create_splits(self.split_config)
-
-                self.train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
-                self.val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
-                self.test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
-
-                logger.info(
-                    f"Split statistics: Train: {len(train_indices)}, "
-                    f"Validation: {len(val_indices)}, Test: {len(test_indices)}"
-                )
-            else:
-                # Default to all indices as training
-                self.train_dataset = EncoderDecoderSubset(self.dataset, list(range(len(self.valid_windows))))
-                self.val_dataset = EncoderDecoderSubset(self.dataset, [])
-                self.test_dataset = EncoderDecoderSubset(self.dataset, [])
+        # Auto-setup if split_config provided
+        if split_config is not None:
+            if len(split_config) != 3:
+                raise ValueError(f"split_config must be tuple of 3 values (train, val, test), got {len(split_config)}")
+            train_ratio, val_ratio, test_ratio = split_config
+            logger.info(f"Auto-running setup() with split_config: {split_config}")
+            self.setup(train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio)
 
     def fit_scaler(self, dataset):
         """
@@ -409,7 +395,7 @@ class EncoderDecoder(pl.LightningDataModule):
         # Larger batch size improves performance
         dataloader = DataLoader(dataset, batch_size=64, shuffle=False, collate_fn=custom_collate_fn)
 
-        use_partial_fit = getattr(self.d1_dataset, "memory_efficient", False)
+        use_partial_fit = self.memory_efficient
 
         if use_partial_fit:
             logger.info(f"Fitting {self.scaling_method} scaler using partial_fit (memory-efficient mode)...")
@@ -593,12 +579,12 @@ class EncoderDecoder(pl.LightningDataModule):
         else:
             raise ValueError(f"Unknown split method: {self.split_method}")
 
-    def _apply_scaling_to_splits(self, train_dataset, val_dataset, test_dataset):
+    def _pretransform_splits(self, train_dataset, val_dataset, test_dataset):
         """
-        Fit scaler on training data and attach to dataset for on-the-fly transformation.
+        Pre-transform all data when memory_efficient=False.
 
-        This unified approach works for both memory_efficient=True and False modes.
-        Transformation happens on-the-fly in EncoderDecoderDataset.__getitem__().
+        This method transforms all samples upfront and caches them, trading memory for speed.
+        Inference will be faster since transformation happens only once.
 
         Args:
             train_dataset: Training dataset
@@ -606,79 +592,156 @@ class EncoderDecoder(pl.LightningDataModule):
             test_dataset: Test dataset
 
         Returns:
-            Tuple of (train_dataset, val_dataset, test_dataset)
+            Tuple of (train_dataset, val_dataset, test_dataset) with pre-transformed data
         """
-        # Step 1: Fit scaler on training data only (no data leakage)
-        self.fit_scaler(train_dataset)
+        logger.info("Pre-transforming training data...")
+        train_transformed = self._pretransform_dataset(train_dataset)
+        val_transformed = self._pretransform_dataset(val_dataset) if val_dataset and len(val_dataset) > 0 else val_dataset
+        test_transformed = self._pretransform_dataset(test_dataset) if test_dataset and len(test_dataset) > 0 else test_dataset
 
-        # Step 2: Attach fitted scalers to the main dataset instance
-        # This makes them available to all subsets (train, val, test)
-        if self.is_scaler_fitted:
-            logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
-            self.dataset.feature_scaler = self.feature_scaler
-            self.dataset.target_scaler = self.target_scaler
-            self.dataset.scale_targets = self.scale_targets
+        logger.info("Pre-transformation complete!")
+        return train_transformed, val_transformed, test_transformed
 
-        return train_dataset, val_dataset, test_dataset
+    def _pretransform_dataset(self, dataset):
+        """
+        Pre-transform a single dataset by applying scaling to all samples.
+        Args:
+            dataset: Dataset to pre-transform
+        Returns:
+            PreTransformedDataset wrapper with cached transformed data
+        """
+        from .utils import PreTransformedDataset
 
-    def split_data(
+        # Transform all samples and cache them
+        transformed_samples = []
+        for i in range(len(dataset)):
+            x, y = dataset[i]
+            transformed_samples.append((x, y))
+
+        # Return a wrapper that serves pre-transformed data
+        return PreTransformedDataset(transformed_samples)
+
+    def _create_group_temporal_splits(self, train_ratio, val_ratio, test_ratio):
+        """
+        Create temporal splits within each group.
+        Args:
+            train_ratio: Ratio for training data
+            val_ratio: Ratio for validation data
+            test_ratio: Ratio for test data
+
+        Returns:
+            Tuple of (train_indices, val_indices, test_indices)
+        """
+        train_windows = []
+        val_windows = []
+        test_windows = []
+
+        # Group windows by group_id
+        from collections import defaultdict
+
+        windows_by_group = defaultdict(list)
+        for idx, window in enumerate(self.valid_windows):
+            group_id = window["group_id"]
+            windows_by_group[group_id].append(idx)
+
+        logger.info(f"Creating group-based temporal splits for {len(windows_by_group)} groups")
+
+        # Split each group temporally
+        for group_id, window_indices in windows_by_group.items():
+            n_windows = len(window_indices)
+
+            # Calculate split points for this group
+            train_end = int(n_windows * train_ratio)
+            val_end = int(n_windows * (train_ratio + val_ratio))
+
+            # Assign windows to splits
+            train_windows.extend(window_indices[:train_end])
+            val_windows.extend(window_indices[train_end:val_end])
+            test_windows.extend(window_indices[val_end:])
+
+        logger.debug(f"Group splits: {len(train_windows)} train, {len(val_windows)} val, {len(test_windows)} test windows")
+
+        return train_windows, val_windows, test_windows
+
+    def setup(
         self,
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
         test_ratio: float = 0.15,
-        method: str = "temporal",
-    ) -> Tuple["EncoderDecoderSubset", "EncoderDecoderSubset", "EncoderDecoderSubset"]:
+    ):
         """
-        Split the dataset into train, validation, and test sets.
+        Setup method: splits data, fits scaler, and prepares datasets.
+        Handles:
+        1. Splitting data based on split_method ('percentage' or 'group')
+        2. Fitting scaler on training data
+        3. Transformation strategy based on memory_efficient:
+           - memory_efficient= False: pre-transforms all data upfront (faster inference)
+           - memory_efficient=True: transforms on-the-fly in __getitem__ (lower memory)
 
         Args:
-            train_ratio: Ratio of data for training
-            val_ratio: Ratio of data for validation
-            test_ratio: Ratio of data for testing
-            method: Split method ('temporal' or 'random')
-
-        Returns:
-            Tuple of (train_dataset, val_dataset, test_dataset)
+            train_ratio: Ratio of data for training (default: 0.7)
+            val_ratio: Ratio of data for validation (default: 0.15)
+            test_ratio: Ratio of data for testing (default: 0.15)
         """
-        from .utils import create_random_splits, create_temporal_splits
+        # Skip if already set up
+        if self.train_dataset is not None:
+            logger.info("Datasets already set up, skipping setup()")
+            return
 
         # Verify ratios sum to 1
         ratio_sum = train_ratio + val_ratio + test_ratio
         if abs(ratio_sum - 1.0) > 1e-6:
             logger.warning(f"Split ratios sum to {ratio_sum:.3f}, not 1.0")
 
-        # Create splits using utility functions
-        if method == "temporal":
+        # Step 1: Create splits based on split_method
+        logger.info(
+            f"Creating splits with method='{self.split_method}' (train={train_ratio}, val={val_ratio}, test={test_ratio})"
+        )
+
+        if self.split_method == "percentage":
+            # Global percentage split
+            from .utils import create_temporal_splits
+
             train_indices, val_indices, test_indices = create_temporal_splits(
                 self.valid_windows, train_ratio, val_ratio, test_ratio
             )
+        elif self.split_method == "group":
+            # Group-based temporal split
+            train_indices, val_indices, test_indices = self._create_group_temporal_splits(train_ratio, val_ratio, test_ratio)
         else:
-            train_indices, val_indices, test_indices = create_random_splits(
-                self.valid_windows, train_ratio, val_ratio, test_ratio, seed=42
-            )
+            raise ValueError(f"Unknown split_method: {self.split_method}. Use 'percentage' or 'group'.")
 
         logger.info(f"Split complete: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
 
+        # Step 2: Create subset datasets
         train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
         val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
         test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
 
-        # Apply scaling using consolidated method
-        return self._apply_scaling_to_splits(train_dataset, val_dataset, test_dataset)
+        # Step 3: Fit scaler and apply transformation strategy
+        if self.scaling_method is not None:
+            logger.info(f"Fitting {self.scaling_method} scaler on training data...")
+            self.fit_scaler(train_dataset)
+            self.is_scaler_fitted = True
 
-    def setup(self, stage=None):
-        """Set up datasets for training, validation, and testing (PyTorch Lightning compatibility)."""
-        if self.train_dataset is None and self.split_config:
-            train_indices, val_indices, test_indices = self._create_splits(self.split_config)
+            # Step 4: Apply transformation based on memory_efficient flag
+            if not self.memory_efficient:
+                # Pre-transform all data for faster inference
+                logger.info("Pre-transforming all splits (memory_efficient=False)...")
+                train_dataset, val_dataset, test_dataset = self._pretransform_splits(train_dataset, val_dataset, test_dataset)
+            else:
+                # Attach scalers to dataset for on-the-fly transformation
+                logger.info("Attaching scalers for on-the-fly transformation (memory_efficient=True)")
+                self.dataset.feature_scaler = self.feature_scaler
+                self.dataset.target_scaler = self.target_scaler
+                self.dataset.scale_targets = self.scale_targets
 
-            train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
-            val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
-            test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
+        # Step 5: Store datasets
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
 
-            # Apply scaling using consolidated method
-            self.train_dataset, self.val_dataset, self.test_dataset = self._apply_scaling_to_splits(
-                train_dataset, val_dataset, test_dataset
-            )
+        logger.info("Setup complete!")
 
     def train_dataloader(self):
         """Return the training dataloader."""

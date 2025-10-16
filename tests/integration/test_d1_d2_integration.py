@@ -79,21 +79,21 @@ class TestD1D2Pipeline:
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=32)
 
         # Split data
-        train, val, test = d2.split_data(method="temporal")
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
         # Verify pipeline
         assert len(d1) == 3  # 3 stations
         assert len(d2.valid_windows) > 0
-        assert len(train) > 0
+        assert len(d2.train_dataset) > 0
 
         # Get sample
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         # Note: May have 3 features if group_id is included in local forecasting
         assert x["x_num_past"].shape[0] == 24  # 24 timesteps
         assert x["x_num_past"].shape[1] >= 2  # At least 2 numerical features
         assert y.shape == (12, 1)  # 1 target
 
-        logger.info(f"✓ Pipeline: D1({len(d1)} groups) → D2({len(d2.valid_windows)} windows) → Train({len(train)})")
+        logger.info(f"✓ Pipeline: D1({len(d1)} groups) → D2({len(d2.valid_windows)} windows) → Train({len(d2.train_dataset)})")
 
     def test_pipeline_with_scaling(self, realistic_weather_data):
         d1 = MultiSourceTSDataSet(
@@ -106,11 +106,11 @@ class TestD1D2Pipeline:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
-        train, val, test = d2.split_data()
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
         # Verify scaling
         assert d2.is_scaler_fitted
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
 
         # Check normalized
         assert abs(x["x_num_past"].mean().item()) < 2
@@ -128,10 +128,10 @@ class TestD1D2Pipeline:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=32)
-        train, val, test = d2.split_data()
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
         # Create DataLoader
-        loader = DataLoader(train, batch_size=32, shuffle=True)
+        loader = DataLoader(d2.train_dataset, batch_size=32, shuffle=True)
         batch = next(iter(loader))
         x, y = batch
 
@@ -161,7 +161,7 @@ class TestD1D2Scaling:
 
         # Create D2 with scaling
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard")
-        train, val, test = d2.split_data()
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
         # Get D1 sample again (should be unchanged)
         d1_sample_after = d1[0]
@@ -171,7 +171,7 @@ class TestD1D2Scaling:
         assert abs(d1_mean - d1_mean_after) < 0.1  # Allow small numerical differences
 
         # D2 data should be scaled (closer to 0)
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         d2_mean = x["x_num_past"][:, 0].mean().item()
         # D2 should be more normalized (closer to 0 for standard scaling)
         assert abs(d2_mean) < 2  # Standard scaled should be close to 0
@@ -188,9 +188,9 @@ class TestD1D2Scaling:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard")
-        train, val, test = d2.split_data()
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         scaled = x["x_num_past"]
 
         # Apply inverse scaling
@@ -221,10 +221,10 @@ class TestD1D2MemoryEfficiency:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12)
-        train, val, test = d2.split_data()
+        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
 
         # Should work with memory-efficient D1
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         assert x["x_num_past"].shape[0] == 24
 
         logger.info("✓ Memory-efficient D1 with D2")
@@ -243,11 +243,10 @@ class TestD1D2TemporalFlow:
             enrich_cat=["hour", "dow", "month"],
         )
 
-        # Check D1 has temporal features
-        d1_sample = d1[0]
-        assert "hour" in d1_sample["cat_cols"]
-        assert "dow" in d1_sample["cat_cols"]
-        assert "month" in d1_sample["cat_cols"]
+        # Check D1 has temporal features in metadata (cat_cols removed from sample per MR comment)
+        assert "hour" in d1.metadata["cat_cols_list"]
+        assert "dow" in d1.metadata["cat_cols_list"]
+        assert "month" in d1.metadata["cat_cols_list"]
 
         # Check D2 propagates temporal features
         d2 = EncoderDecoder(d1, past_len=24, future_len=12)

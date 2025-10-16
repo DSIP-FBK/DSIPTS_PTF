@@ -154,18 +154,20 @@ class TestD1CategoricalInfo:
 
     def test_cat_cols_and_cardinalities(self, basic_csv_data):
         d1 = MultiSourceTSDataSet(**basic_csv_data)
-        sample = d1[0]
 
-        assert "cat_cols" in sample
-        assert "cat_cardinalities" in sample
-        assert len(sample["cat_cols"]) == len(sample["cat_cardinalities"])
+        # Check metadata instead of sample (cat_cols removed from getitem per MR comment)
+        assert "cat_cols_list" in d1.metadata
+        assert "cat_cardinalities" in d1.metadata
+        cat_cols_list = d1.metadata["cat_cols_list"]
+        cat_cardinalities = d1.metadata["cat_cardinalities"]
+        assert len(cat_cols_list) == len(cat_cardinalities)
 
         # Verify order preservation
-        for col, card in zip(sample["cat_cols"], sample["cat_cardinalities"]):
+        for col, card in zip(cat_cols_list, cat_cardinalities):
             if col in d1.label_encoders:
                 actual = len(d1.label_encoders[col].classes_)
                 assert card == actual
-        logger.info(f"✓ Cat info: {sample['cat_cols']} -> {sample['cat_cardinalities']}")
+        logger.info(f"✓ Cat info: {cat_cols_list} -> {cat_cardinalities}")
 
 
 class TestD1TemporalEnrichment:
@@ -173,26 +175,23 @@ class TestD1TemporalEnrichment:
 
     def test_hour_enrichment(self, datetime_data):
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["hour"])
-        sample = d1[0]
 
-        assert "hour" in sample["cat_cols"]
+        assert "hour" in d1.metadata["cat_cols_list"]
         assert "hour" in d1.label_encoders
         logger.info(f"✓ Hour enrichment: {len(d1.label_encoders['hour'].classes_)} hours")
 
     def test_dow_enrichment(self, datetime_data):
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["dow"])
-        sample = d1[0]
 
-        assert "dow" in sample["cat_cols"]
+        assert "dow" in d1.metadata["cat_cols_list"]
         assert len(d1.label_encoders["dow"].classes_) == 7
         logger.info("✓ DOW enrichment: 7 days")
 
     def test_multiple_enrichment(self, datetime_data):
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["hour", "dow", "month"])
-        sample = d1[0]
 
         for feat in ["hour", "dow", "month"]:
-            assert feat in sample["cat_cols"]
+            assert feat in d1.metadata["cat_cols_list"]
         logger.info("✓ Multiple enrichment")
 
 
@@ -305,9 +304,8 @@ class TestD1TemporalEdgeCases:
             enrich_cat=["minute", "hour", "dow", "month"],
         )
 
-        sample = d1[0]
         for feat in ["minute", "hour", "dow", "month"]:
-            assert feat in sample["cat_cols"]
+            assert feat in d1.metadata["cat_cols_list"]
         logger.info("✓ All temporal features")
 
     def test_temporal_cardinalities_validation(self, temp_dir):
@@ -331,12 +329,9 @@ class TestD1TemporalEdgeCases:
             enrich_cat=["hour", "dow"],
         )
 
-        # Get sample to check cardinalities
-        sample = d1[0]
-
-        # STRONG VALIDATION: Check cardinalities are present and correct
-        assert "cat_cardinalities" in sample, "cat_cardinalities missing from sample"
-        cardinalities = sample["cat_cardinalities"]
+        # Check cardinalities in metadata (removed from sample per MR comment)
+        assert "cat_cardinalities" in d1.metadata, "cat_cardinalities missing from metadata"
+        cardinalities = d1.metadata["cat_cardinalities"]
 
         # Should have: group (1), hour (24), dow (7)
         assert len(cardinalities) == 3, f"Expected 3 cardinalities, got {len(cardinalities)}: {cardinalities}"
@@ -378,9 +373,8 @@ class TestD1TemporalEdgeCases:
             enrich_cat=["hour", "dow", "month", "minute"],
         )
 
-        sample = d1[0]
-        cat_cols = sample["cat_cols"]
-        cardinalities = sample["cat_cardinalities"]
+        cat_cols = d1.metadata["cat_cols_list"]
+        cardinalities = d1.metadata["cat_cardinalities"]
 
         # STRONG VALIDATION: Check all temporal features present
         assert len(cat_cols) >= 4, f"Expected at least 4 cat_cols, got {len(cat_cols)}"
@@ -393,6 +387,240 @@ class TestD1TemporalEdgeCases:
             assert expected in found_cardinalities, f"Expected cardinality {expected} not found in {cardinalities}"
 
         logger.info(f"✓ All temporal cardinalities correct: {cardinalities}")
+
+    def test_temporal_enrichment_in_metadata(self, temp_dir):
+        """COMPREHENSIVE: Validate temporal enrichment updates metadata correctly."""
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = []
+        for h in range(200):
+            data.append(
+                {
+                    "timestamp": start + timedelta(hours=h),
+                    "group": "g1",
+                    "station": "A" if h % 2 == 0 else "B",
+                    "val": h,
+                    "target": h,
+                }
+            )
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        # Create D1 with temporal enrichment
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            cat_cols=["station"],
+            num_cols=["val"],
+            target_cols=["target"],
+            enrich_cat=["hour", "dow"],
+        )
+
+        # VALIDATION 1: Check metadata exists
+        assert hasattr(d1, "metadata"), "metadata attribute missing"
+        metadata = d1.metadata
+
+        # VALIDATION 2: Check cat_cols_list includes temporal features
+        assert "cat_cols_list" in metadata, "cat_cols_list missing from metadata"
+        cat_cols_list = metadata["cat_cols_list"]
+
+        assert "hour" in cat_cols_list, f"hour not in cat_cols_list: {cat_cols_list}"
+        assert "dow" in cat_cols_list, f"dow not in cat_cols_list: {cat_cols_list}"
+        assert "station" in cat_cols_list, f"station not in cat_cols_list: {cat_cols_list}"
+        assert "group" in cat_cols_list, f"group not in cat_cols_list: {cat_cols_list}"
+
+        # VALIDATION 3: Check cat_cardinalities matches cat_cols_list
+        assert "cat_cardinalities" in metadata, "cat_cardinalities missing from metadata"
+        cat_cardinalities = metadata["cat_cardinalities"]
+
+        assert len(cat_cols_list) == len(cat_cardinalities), (
+            f"Length mismatch: cat_cols_list={len(cat_cols_list)}, " f"cat_cardinalities={len(cat_cardinalities)}"
+        )
+
+        # VALIDATION 4: Check specific cardinalities for temporal features
+        hour_idx = cat_cols_list.index("hour")
+        dow_idx = cat_cols_list.index("dow")
+
+        assert cat_cardinalities[hour_idx] == 24, f"hour cardinality should be 24, got {cat_cardinalities[hour_idx]}"
+        assert cat_cardinalities[dow_idx] == 7, f"dow cardinality should be 7, got {cat_cardinalities[dow_idx]}"
+
+        # VALIDATION 5: Check enrich_cat in metadata
+        assert "enrich_cat" in metadata, "enrich_cat missing from metadata"
+        assert metadata["enrich_cat"] == ["hour", "dow"], f"enrich_cat mismatch: {metadata['enrich_cat']}"
+
+        # VALIDATION 6: Verify __getitem__ matches metadata
+        sample = d1[0]
+        assert (
+            d1.metadata["cat_cols_list"] == cat_cols_list
+        ), f"getitem cat_cols doesn't match metadata: {sample['cat_cols']} != {cat_cols_list}"
+        assert d1.metadata["cat_cardinalities"] == cat_cardinalities, (
+            f"getitem cat_cardinalities doesn't match metadata: " f"{sample['cat_cardinalities']} != {cat_cardinalities}"
+        )
+
+        logger.info("✓ Temporal enrichment in metadata validated")
+        logger.info(f"  cat_cols_list: {cat_cols_list}")
+        logger.info(f"  cat_cardinalities: {cat_cardinalities}")
+
+    def test_temporal_enrichment_metadata_all_features(self, temp_dir):
+        """COMPREHENSIVE: Test metadata with all temporal features."""
+        np.random.seed(42)
+        start = datetime(2024, 1, 1)
+        data = []
+        for d in range(90):
+            for h in range(0, 24, 6):  # Every 6 hours
+                for m in [0, 15, 30, 45]:  # 4 different minutes
+                    data.append(
+                        {
+                            "timestamp": start + timedelta(days=d, hours=h, minutes=m),
+                            "group": "g1",
+                            "val": len(data),
+                            "target": len(data),
+                        }
+                    )
+        df = pd.DataFrame(data)
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        # Create D1 with all temporal features
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            num_cols=["val"],
+            target_cols=["target"],
+            enrich_cat=["minute", "hour", "dow", "month"],
+        )
+
+        metadata = d1.metadata
+
+        # VALIDATION 1: All temporal features in cat_cols_list
+        cat_cols_list = metadata["cat_cols_list"]
+        for feat in ["minute", "hour", "dow", "month"]:
+            assert feat in cat_cols_list, f"{feat} not in cat_cols_list: {cat_cols_list}"
+
+        # VALIDATION 2: Correct cardinalities for each temporal feature
+        cat_cardinalities = metadata["cat_cardinalities"]
+        expected_cardinalities = {
+            "minute": 4,  # 0, 15, 30, 45
+            "hour": 4,  # 0, 6, 12, 18
+            "dow": 7,  # 7 days
+            "month": 3,  # Jan, Feb, Mar
+        }
+
+        for feat, expected_card in expected_cardinalities.items():
+            feat_idx = cat_cols_list.index(feat)
+            actual_card = cat_cardinalities[feat_idx]
+            assert actual_card == expected_card, f"{feat} cardinality should be {expected_card}, got {actual_card}"
+
+        # VALIDATION 3: Metadata matches getitem
+        assert d1.metadata["cat_cols_list"] == cat_cols_list
+        assert d1.metadata["cat_cardinalities"] == cat_cardinalities
+
+        logger.info("✓ All temporal features in metadata validated")
+        logger.info(f"  cat_cols_list: {cat_cols_list}")
+        logger.info(f"  cat_cardinalities: {cat_cardinalities}")
+
+
+def test_d1_memory_efficient_override_for_dataframes():
+    """Test that memory_efficient is forced to False when using DataFrames."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    # Request True - should be overridden to False
+    d1_true = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        memory_efficient=True,  # Request True
+    )
+
+    # Should be overridden to False
+    assert d1_true.memory_efficient is False, "memory_efficient should be False for DataFrames"
+    assert d1_true.cached_data is not None, "cached_data should exist (not None)"
+
+    # Request False - should stay False
+    d1_false = MultiSourceTSDataSet(
+        dataframes=[df], group_cols=["group"], time_col="date", num_cols=["OT"], target_cols=["OT"], memory_efficient=False
+    )
+
+    assert d1_false.memory_efficient is False, "memory_efficient should be False"
+    logger.info("✓ memory_efficient override test passed")
+
+
+def test_d1_target_in_features_by_default():
+    """Test that target is included in features by default."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=100, freq="h"),
+            "OT": np.random.randn(100) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df], group_cols=["group"], time_col="date", num_cols=["OT"], target_cols=["OT"], global_forecasting=False
+    )
+
+    sample = d1[0]
+
+    # Target should be in features (x)
+    assert "OT" in d1.metadata["feature_cols"], "OT should be in feature_cols"
+
+    # x should contain the target column
+    n_features = sample["x"].shape[1]
+    assert n_features >= 1, "x should have at least 1 feature (the target)"
+
+    logger.info("✓ target in features test passed")
+
+
+def test_d1_sample_structure_strict():
+    """Test D1 sample has expected strict structure."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=100, freq="h"),
+            "OT": np.random.randn(100) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df], group_cols=["group"], time_col="date", num_cols=["OT"], target_cols=["OT"], global_forecasting=False
+    )
+
+    sample = d1[0]
+
+    # Check required keys
+    required_keys = ["x", "y", "group_id"]
+    for key in required_keys:
+        assert key in sample, f"Sample should contain '{key}'"
+
+    # Verify tensor types and shapes
+    import torch
+
+    assert isinstance(sample["x"], torch.Tensor), "x should be a tensor"
+    assert isinstance(sample["y"], torch.Tensor), "y should be a tensor"
+    assert sample["x"].dim() == 2, "x should be 2D (timesteps, features)"
+    assert sample["y"].dim() == 2, "y should be 2D (timesteps, targets)"
+
+    # Verify group_id
+    assert isinstance(sample["group_id"], int), "group_id should be an integer"
+    assert sample["group_id"] in [0, 1], "group_id should be 0 or 1"
+
+    logger.info("✓ D1 sample structure strict test passed")
 
 
 if __name__ == "__main__":

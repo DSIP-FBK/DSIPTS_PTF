@@ -80,40 +80,35 @@ class TestD2Batch:
 
 class TestD2Scaling:
     def test_standard(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard")
-        train, val, test = d2.split_data()
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", split_config=(0.7, 0.15, 0.15))
         assert d2.is_scaler_fitted
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         assert abs(x["x_num_past"].mean().item()) < 2
         logger.info("✓ Standard scaling")
 
     def test_minmax(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="minmax")
-        train, val, test = d2.split_data()
-        x, y = train[0]
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="minmax", split_config=(0.7, 0.15, 0.15))
+        x, y = d2.train_dataset[0]
         assert x["x_num_past"].min() >= -0.1 and x["x_num_past"].max() <= 1.1
         logger.info("✓ MinMax scaling")
 
 
 class TestD2Splitting:
     def test_temporal(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
-        train, val, test = d2.split_data(method="temporal")
-        assert len(train) > 0 and len(val) > 0 and len(test) > 0
-        logger.info(f"✓ Temporal: train={len(train)}, val={len(val)}, test={len(test)}")
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_method="percentage", split_config=(0.7, 0.15, 0.15))
+        assert len(d2.train_dataset) > 0 and len(d2.val_dataset) > 0 and len(d2.test_dataset) > 0
+        logger.info(f"✓ Temporal: train={len(d2.train_dataset)}, val={len(d2.val_dataset)}, test={len(d2.test_dataset)}")
 
     def test_random(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
-        train, val, test = d2.split_data(method="random")
-        assert len(train) > 0
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_method="percentage", split_config=(0.7, 0.15, 0.15))
+        assert len(d2.train_dataset) > 0
         logger.info("✓ Random split")
 
 
 class TestD2DataLoader:
     def test_loader(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, batch_size=16)
-        train, val, test = d2.split_data()
-        loader = DataLoader(train, batch_size=16, shuffle=True)
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, batch_size=16, split_config=(0.7, 0.15, 0.15))
+        loader = DataLoader(d2.train_dataset, batch_size=16, shuffle=True)
         batch = next(iter(loader))
         x, y = batch
         assert x["x_num_past"].dim() == 3
@@ -156,23 +151,25 @@ class TestD2TargetScaling:
     """Test target scaling functionality."""
 
     def test_target_scaling_enabled(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
-        train, val, test = d2.split_data()
+        d2 = EncoderDecoder(
+            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=True, split_config=(0.7, 0.15, 0.15)
+        )
 
         # Check that target scaler exists
         assert d2.target_scaler is not None
 
         # Check scaled targets
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         assert abs(y.mean().item()) < 2  # Should be normalized
         logger.info("✓ Target scaling enabled")
 
     def test_target_scaling_disabled(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=False)
-        train, val, test = d2.split_data()
+        d2 = EncoderDecoder(
+            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=False, split_config=(0.7, 0.15, 0.15)
+        )
 
         # Target scaler should still exist but not applied
-        x, y = train[0]
+        x, y = d2.train_dataset[0]
         # Targets should not be normalized (will have larger range)
         logger.info("✓ Target scaling disabled")
 
@@ -206,15 +203,20 @@ class TestD2TargetScaling:
             memory_efficient=False,
         )
 
-        d2 = EncoderDecoder(d1_dataset=d1, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
-
-        train, val, test = d2.split_data(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2 = EncoderDecoder(
+            d1_dataset=d1,
+            past_len=24,
+            future_len=12,
+            scaling_method="standard",
+            scale_targets=True,
+            split_config=(0.7, 0.15, 0.15),
+        )
 
         # Collect features from multiple samples
         all_features = []
         all_targets = []
-        for i in range(min(50, len(train))):
-            x, y = train[i]
+        for i in range(min(50, len(d2.train_dataset))):
+            x, y = d2.train_dataset[i]
             if "x_num_past" in x:
                 all_features.append(x["x_num_past"].numpy())
             all_targets.append(y.numpy())
@@ -273,15 +275,15 @@ class TestD2TargetScaling:
             memory_efficient=False,
         )
 
-        d2 = EncoderDecoder(d1_dataset=d1, past_len=24, future_len=12, scaling_method="minmax", scale_targets=True)
-
-        train, val, test = d2.split_data(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2 = EncoderDecoder(
+            d1_dataset=d1, past_len=24, future_len=12, scaling_method="minmax", scale_targets=True, split_config=(0.7, 0.15, 0.15)
+        )
 
         # Collect features
         all_features = []
         all_targets = []
-        for i in range(min(50, len(train))):
-            x, y = train[i]
+        for i in range(min(50, len(d2.train_dataset))):
+            x, y = d2.train_dataset[i]
             if "x_num_past" in x:
                 all_features.append(x["x_num_past"].numpy())
             all_targets.append(y.numpy())
@@ -345,14 +347,19 @@ class TestD2TargetScaling:
             chunk_size=50,
         )
 
-        d2 = EncoderDecoder(d1_dataset=d1, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
-
-        train, val, test = d2.split_data(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2 = EncoderDecoder(
+            d1_dataset=d1,
+            past_len=24,
+            future_len=12,
+            scaling_method="standard",
+            scale_targets=True,
+            split_config=(0.7, 0.15, 0.15),
+        )
 
         # STRONG VALIDATION: Scaling should work even with chunked data
         all_features = []
-        for i in range(min(30, len(train))):
-            x, y = train[i]
+        for i in range(min(30, len(d2.train_dataset))):
+            x, y = d2.train_dataset[i]
             if "x_num_past" in x:
                 all_features.append(x["x_num_past"].numpy())
 
@@ -466,13 +473,12 @@ class TestD2SplitValidation:
     """Test data splitting validation."""
 
     def test_split_ratio_sum(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12)
-        train, val, test = d2.split_data(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15))
 
-        total = len(train) + len(val) + len(test)
-        train_pct = len(train) / total
-        val_pct = len(val) / total
-        test_pct = len(test) / total
+        total = len(d2.train_dataset) + len(d2.val_dataset) + len(d2.test_dataset)
+        train_pct = len(d2.train_dataset) / total
+        val_pct = len(d2.val_dataset) / total
+        test_pct = len(d2.test_dataset) / total
 
         # Check ratios are approximately correct
         assert 0.65 < train_pct < 0.75
@@ -527,6 +533,313 @@ class TestD2GlobalVsLocal:
         # In local forecasting, group should be in categorical features
         assert x["x_cat_past"].shape[1] > 0  # Should have group_id
         logger.info("✓ Local: group in cat features")
+
+
+def test_d2_initialization_without_setup():
+    """Test D2 initializes but datasets are None without setup."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        enrich_cat=["minute"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, scaling_method="standard")
+
+    # Datasets should be None (not set up yet)
+    assert d2.train_dataset is None, "train_dataset should be None before setup"
+    assert d2.val_dataset is None, "val_dataset should be None before setup"
+    assert d2.test_dataset is None, "test_dataset should be None before setup"
+    assert d2.is_scaler_fitted is False, "Scaler should not be fitted yet"
+
+    # Configuration should be set
+    assert d2.past_len == 24, "past_len should match input"
+    assert d2.future_len == 12, "future_len should match input"
+    assert d2.scaling_method == "standard", "scaling_method should match input"
+
+    logger.info("✓ D2 initialization without setup test passed")
+
+
+def test_d2_auto_setup_with_split_config():
+    """Test D2 auto-setup when split_config is provided."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        enrich_cat=["minute"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(
+        d1,
+        past_len=24,
+        future_len=12,
+        batch_size=8,
+        split_config=(0.7, 0.15, 0.15),  # Auto-setup
+        scaling_method="standard",
+    )
+
+    # Datasets should be created
+    assert d2.train_dataset is not None, "train_dataset should be created"
+    assert d2.val_dataset is not None, "val_dataset should be created"
+    assert d2.test_dataset is not None, "test_dataset should be created"
+    assert d2.is_scaler_fitted is True, "Scaler should be fitted"
+
+    # Check split ratios
+    total = len(d2.train_dataset) + len(d2.val_dataset) + len(d2.test_dataset)
+    train_ratio = len(d2.train_dataset) / total
+    val_ratio = len(d2.val_dataset) / total
+    test_ratio = len(d2.test_dataset) / total
+
+    assert 0.65 < train_ratio < 0.75, f"Train ratio should be ~0.7, got {train_ratio}"
+    assert 0.10 < val_ratio < 0.20, f"Val ratio should be ~0.15, got {val_ratio}"
+    assert 0.10 < test_ratio < 0.20, f"Test ratio should be ~0.15, got {test_ratio}"
+
+    logger.info("✓ D2 auto-setup with split_config test passed")
+
+
+def test_d2_manual_setup():
+    """Test D2 manual setup() call."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        enrich_cat=["minute"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, scaling_method="standard")
+
+    # Before setup
+    assert d2.train_dataset is None, "Datasets should be None before setup"
+
+    # Call setup manually
+    d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+
+    # After setup
+    assert d2.train_dataset is not None, "train_dataset should be created after setup"
+    assert d2.val_dataset is not None, "val_dataset should be created after setup"
+    assert d2.test_dataset is not None, "test_dataset should be created after setup"
+    assert d2.is_scaler_fitted is True, "Scaler should be fitted after setup"
+
+    logger.info("✓ D2 manual setup test passed")
+
+
+def test_d2_inherits_memory_efficient():
+    """Test D2 inherits memory_efficient from D1."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15), scaling_method="standard")
+
+    # D2 should inherit from D1
+    assert d2.memory_efficient == d1.memory_efficient, "D2 should inherit memory_efficient from D1"
+
+    logger.info("✓ D2 inherits memory_efficient test passed")
+
+
+def test_d2_scaling_produces_normalized_data():
+    """Test scaler produces mean~0, std~1."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(
+        d1, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15), scaling_method="standard", scale_targets=True
+    )
+
+    # Scaler should be fitted
+    assert d2.is_scaler_fitted is True, "Scaler should be fitted"
+    assert d2.feature_scaler is not None, "feature_scaler should exist"
+    assert d2.target_scaler is not None, "target_scaler should exist"
+
+    # Scaler should have learned parameters
+    assert hasattr(d2.feature_scaler, "mean_"), "Scaler should have mean_"
+    assert hasattr(d2.feature_scaler, "scale_"), "Scaler should have scale_"
+
+    # Check that scaling produces mean~0, std~1
+    x, y = d2.train_dataset[0]
+    x_mean = x["x_num_past"].mean().item()
+    x_std = x["x_num_past"].std().item()
+
+    assert abs(x_mean) < 2.0, f"Scaled mean should be ~0, got {x_mean}"
+    assert 0.5 < x_std < 2.0, f"Scaled std should be ~1, got {x_std}"
+
+    logger.info("✓ D2 scaling produces normalized data test passed")
+
+
+def test_d2_dataloader_batch_structure():
+    """Test D2 dataloader produces correct batch structure."""
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        enrich_cat=["minute"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, split_config=(0.7, 0.15, 0.15), scaling_method="standard")
+
+    train_loader = d2.train_dataloader()
+    batch = next(iter(train_loader))
+
+    # Check batch structure
+    assert isinstance(batch, dict), "Batch should be a dictionary"
+    required_keys = ["x_num_past", "x_cat_past", "x_cat_future", "y", "idx_target", "time_idx"]
+    for key in required_keys:
+        assert key in batch, f"Batch should contain '{key}'"
+
+    # Check batch shapes
+    assert batch["x_num_past"].shape[0] == 8, "Batch should have batch_size=8"
+    assert batch["x_num_past"].shape[1] == 24, "Should have past_len=24 timesteps"
+    assert batch["y"].shape[0] == 8, "y should have batch_size=8"
+    assert batch["y"].shape[1] == 12, "y should have future_len=12 timesteps"
+
+    logger.info("✓ D2 dataloader batch structure test passed")
+
+
+def test_end_to_end_d1_d2_workflow():
+    """Test complete D1→D2 workflow with strict validation."""
+    # Step 1: Create data
+    np.random.seed(42)
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
+            "OT": np.random.randn(500) * 10 + 50,
+        }
+    )
+    df["group"] = 10
+    df.loc[df.shape[0] // 2 :, "group"] = 17
+
+    # Step 2: Create D1
+    d1 = MultiSourceTSDataSet(
+        dataframes=[df],
+        group_cols=["group"],
+        time_col="date",
+        num_cols=["OT"],
+        target_cols=["OT"],
+        enrich_cat=["minute"],
+        memory_efficient=False,
+        global_forecasting=False,
+    )
+
+    assert len(d1) == 2, "D1 should have 2 groups"
+
+    # Step 3: Create D2 with auto-setup
+    d2 = EncoderDecoder(
+        d1,
+        past_len=24,
+        future_len=12,
+        batch_size=8,
+        split_config=(0.7, 0.15, 0.15),
+        scaling_method="standard",
+        scale_targets=True,
+    )
+
+    assert d2.train_dataset is not None, "D2 should be set up"
+    assert d2.is_scaler_fitted is True, "Scaler should be fitted"
+
+    # Step 4: Get a batch
+    train_loader = d2.train_dataloader()
+    batch = next(iter(train_loader))
+
+    assert batch["x_num_past"].shape == (8, 24, 1), "Batch shape should be correct"
+    assert batch["y"].shape == (8, 12, 1), "Target shape should be correct"
+
+    # Step 5: Verify scaling
+    batch_mean = batch["x_num_past"].mean().item()
+    batch_std = batch["x_num_past"].std().item()
+
+    assert abs(batch_mean) < 2.0, f"Scaled batch mean should be ~0, got {batch_mean}"
+    assert 0.5 < batch_std < 2.0, f"Scaled batch std should be ~1, got {batch_std}"
+
+    logger.info("✓ End-to-end workflow test passed")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         weights: Optional[str] = None,
         memory_efficient: bool = False,
         chunk_size: int = 10000,
+        add_target_to_past: bool = True,
         read_options: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -81,12 +82,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
             weights: Name of weights column
             memory_efficient: Whether to use memory-efficient mode
             chunk_size: Chunk size for processing data (used in memory-efficient mode)
+            add_target_to_past: Whether include target columns in past features (default: true)
             read_options: Dictionary of options to pass to pandas read functions
-                Examples:
-                - {'sep': ';'} for semicolon-separated files
-                - {'na_values': ['NA', 'NULL', '-9999']} for custom missing
-                - {'usecols': ['col1', 'col2']} to read specific columns
-                - {'dtype': {'col1': 'int32'}} to specify data types
         """
         super().__init__()
 
@@ -125,6 +122,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._num_cols = num_cols or []
         self._enrich_cat = enrich_cat or []
         self.global_forecasting = global_forecasting
+        self.add_target_to_past = add_target_to_past
 
         self._past_cols = past_cols or []
         self._future_cols = future_cols or []
@@ -171,9 +169,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         Infer feature columns from specified columns or data headers.
         """
-        # Use explicitly specified columns (including targets)
+        # Use explicitly specified columns (including targets if add_target_to_past is True)
         if self._past_cols or self._num_cols or self._cat_cols or self._target_cols:
-            feature_cols = list(dict.fromkeys(self._past_cols + self._num_cols + self._cat_cols + self._target_cols))
+            if self.add_target_to_past:
+                feature_cols = list(dict.fromkeys(self._past_cols + self._num_cols + self._cat_cols + self._target_cols))
+            else:
+                feature_cols = list(dict.fromkeys(self._past_cols + self._num_cols + self._cat_cols))
             if self._enrich_cat:
                 feature_cols = list(dict.fromkeys(feature_cols + self._enrich_cat))
             return feature_cols
@@ -655,10 +656,8 @@ class MultiSourceTSDataSet(BaseD1Layer):
 
         for file_group_key in self._group_ids:
             if self.use_dataframes:
-                df_name, group_key = file_group_key
                 group_data = self._load_group_data_from_dataframe(file_group_key)
             else:
-                file_path, group_key = file_group_key
                 group_data = self._load_group_data(file_group_key)
             self.cached_data[file_group_key] = group_data
 
@@ -668,7 +667,7 @@ class MultiSourceTSDataSet(BaseD1Layer):
         """
         Load data for a specific group from a DataFrame.
         """
-        df_name, group_key = file_group_key
+        _, group_key = file_group_key
         df_idx = self.group_info[file_group_key]["file_idx"]  # Use file_idx, not df_idx
         df = self.dataframes[df_idx]
 
@@ -740,22 +739,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         This method is now a wrapper around the utility function.
         """
         return process_group_data(group_data, self._cat_cols, self.label_encoders)
-
-    def _load_group_data_on_demand(self, file_group_key):
-        """
-        Load group data on demand for memory-efficient mode.
-        """
-        group_info = self.group_info[file_group_key]
-        file_path = group_info["file_path"]
-        group_key = group_info["group_key"]
-
-        # Load the file (could be cached at file level)
-        df = pd.read_csv(file_path)
-        df = self._parse_and_enrich_chunk(df)
-
-        # Extract group data without applying encoding
-        group_data = self._extract_group_data(df, group_key)
-        return group_data
 
     def __len__(self) -> int:
         """
@@ -866,30 +849,10 @@ class MultiSourceTSDataSet(BaseD1Layer):
         time_indices = time_indices
         seq_len = len(group_data)
 
-        # Build cat_cols and cardinalities dynamically to include temporal enrichment
-        cat_cols_list = []
-        cat_cardinalities_list = []
-
-        # Get cardinalities from metadata (includes both regular and temporal features)
-        all_cardinalities = self.metadata.get("categorical_cardinalities", {})
-
-        # Iterate through current _cat_cols (includes temporal enrichment)
-        for col in self._cat_cols:
-            if col in all_cardinalities:
-                cat_cols_list.append(col)
-                cat_cardinalities_list.append(all_cardinalities[col])
-            elif col in self.label_encoders:
-                # Fallback: get from label encoder if not in metadata
-                cat_cols_list.append(col)
-                cat_cardinalities_list.append(len(self.label_encoders[col].classes_))
-
         return {
             "x": features,
             "y": targets,
             "group_id": group_id,
-            "past_time": time_indices,  # All time indices for this group
-            "future_time": time_indices,  # Same as past_time for now
+            "time": time_indices,  # time indices for the group
             "seq_len": seq_len,  # Length of the sequence
-            "cat_cols": cat_cols_list,
-            "cat_cardinalities": cat_cardinalities_list,
         }
