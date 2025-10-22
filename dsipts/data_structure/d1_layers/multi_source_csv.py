@@ -251,7 +251,13 @@ class MultiSourceTSDataSet(BaseD1Layer):
             mandatory_cols.add(self.group_cols)
 
         # Use utility function for parsing and enrichment
-        chunk = parse_and_enrich_chunk(chunk, self._time_col, self._enrich_cat, list(mandatory_cols))
+        chunk = parse_and_enrich_chunk(
+            chunk,
+            self._time_col,
+            self._enrich_cat,
+            list(mandatory_cols),
+            preserve_enriched=True,  # Keep enriched temporal features
+        )
 
         # Update encoders after enrichment
         if self._enrich_cat:

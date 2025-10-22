@@ -356,7 +356,11 @@ def process_group_data(
 
 
 def parse_and_enrich_chunk(
-    chunk: pd.DataFrame, time_col: str, enrich_cat: List[str] = None, mandatory_cols: List[str] = None
+    chunk: pd.DataFrame,
+    time_col: str,
+    enrich_cat: List[str] = None,
+    mandatory_cols: List[str] = None,
+    preserve_enriched: bool = False,
 ) -> pd.DataFrame:
     """
     Parse and enrich a chunk of data.
@@ -366,6 +370,7 @@ def parse_and_enrich_chunk(
         time_col: Name of the time column
         enrich_cat: List of temporal features to enrich
         mandatory_cols: List of mandatory columns to keep
+        preserve_enriched: If True, keep enriched temporal features even if not in mandatory_cols
 
     Returns:
         Processed and enriched chunk
@@ -386,7 +391,16 @@ def parse_and_enrich_chunk(
 
     # Filter to mandatory columns if specified
     if mandatory_cols:
-        filtered_cols = [col for col in mandatory_cols if col in chunk.columns]
+        filtered_cols = list(mandatory_cols)
+
+        # If preserve_enriched is True, add enriched features that were just created
+        if preserve_enriched and enrich_cat:
+            for feature in enrich_cat:
+                if feature in chunk.columns and feature not in filtered_cols:
+                    filtered_cols.append(feature)
+
+        # Only keep columns that exist in the chunk
+        filtered_cols = [col for col in filtered_cols if col in chunk.columns]
         chunk = chunk[filtered_cols]
 
     return chunk

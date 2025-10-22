@@ -213,11 +213,10 @@ class PreTransformedDataset:
     """
     Wrapper for pre-transformed datasets.
 
-    This class caches transformed samples for faster access when memory_efficient=False.
-    Instead of transforming data on-the-fly in __getitem__(), all data is transformed
-    once upfront and stored in memory.
+    This class stores transformed data in vectorized numpy arrays and creates
+    sample dicts on-demand in __getitem__().
 
-    Trade-off: Uses more memory but provides faster inference.
+    Trade-off: Uses more memory but provides faster setup and inference.
     """
 
     def __init__(self, transformed_samples: List[Tuple[Dict[str, Any], torch.Tensor]]):
@@ -244,3 +243,88 @@ class PreTransformedDataset:
             Tuple of (x, y) where x is dict and y is tensor
         """
         return self.samples[idx]
+
+
+class VectorizedPreTransformedDataset:
+    """
+    Vectorized storage for pre-transformed datasets.
+    """
+
+    def __init__(
+        self,
+        all_x_num_past,
+        all_x_num_future,
+        all_X_past,
+        all_X_future,
+        all_y,
+        indices,
+        valid_windows,
+        idx_categorical,
+        future_cat_indices,
+        idx_target_tensor,
+        global_forecasting,
+        meta,
+    ):
+        """Store vectorized data."""
+        self.all_x_num_past = all_x_num_past
+        self.all_x_num_future = all_x_num_future
+        self.all_X_past = all_X_past
+        self.all_X_future = all_X_future
+        self.all_y = all_y
+        self.indices = indices
+        self.valid_windows = valid_windows
+        self.idx_categorical = idx_categorical
+        self.future_cat_indices = future_cat_indices
+        self.idx_target_tensor = idx_target_tensor
+        self.global_forecasting = global_forecasting
+        self.meta = meta
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        """Create dict on-demand (fast)."""
+        window_idx = self.indices[idx]
+        window = self.valid_windows[window_idx]
+        start_idx = window["start_idx"]
+
+        x = {}
+
+        # Add numeric features
+        if self.all_x_num_past is not None:
+            x["x_num_past"] = torch.from_numpy(self.all_x_num_past[idx]).float()
+        else:
+            x["x_num_past"] = torch.zeros((self.all_X_past.shape[1], 0), dtype=torch.float32)
+
+        if self.all_x_num_future is not None:
+            x["x_num_future"] = torch.from_numpy(self.all_x_num_future[idx]).float()
+
+        # Add categorical features
+        if len(self.idx_categorical) > 0:
+            x["x_cat_past"] = torch.from_numpy(self.all_X_past[idx, :, self.idx_categorical]).long()
+
+            if len(self.future_cat_indices) > 0:
+                x["x_cat_future"] = torch.from_numpy(self.all_X_future[idx, :, self.future_cat_indices]).long()
+
+        # Add targets
+        y = torch.from_numpy(self.all_y[idx]).float()
+        x["y"] = y
+
+        # Add idx_target
+        x["idx_target"] = self.idx_target_tensor
+
+        # Add group_id if needed
+        if self.global_forecasting:
+            group_id = window.get("group_id", 0)
+            if isinstance(group_id, str):
+                meta_group_mapping = self.meta.get("group_mapping", {})
+                group_id = meta_group_mapping.get(group_id, 0)
+                x["group_id"] = int(group_id)
+            elif isinstance(group_id, (int, float)):
+                x["group_id"] = int(group_id)
+            else:
+                x["group_id"] = group_id
+
+        x["time_idx"] = start_idx
+
+        return x, y

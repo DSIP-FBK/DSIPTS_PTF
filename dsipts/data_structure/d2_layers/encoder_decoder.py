@@ -203,24 +203,20 @@ class EncoderDecoderDataset(Dataset):
         y = future_targets
 
         # Apply scaling on-the-fly if scaler is fitted
-        # Works for both memory_efficient=True and False modes
         if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
             # Scale x_num_past
             if "x_num_past" in x and x["x_num_past"].numel() > 0:
-                x_num_past_np = x["x_num_past"].numpy()
-                x_num_past_scaled = self.feature_scaler.transform(x_num_past_np)
+                x_num_past_scaled = self.feature_scaler.transform(x["x_num_past"].numpy())
                 x["x_num_past"] = torch.from_numpy(x_num_past_scaled).float()
 
             # Scale x_num_future (if present)
             if "x_num_future" in x and x["x_num_future"].numel() > 0:
-                x_num_future_np = x["x_num_future"].numpy()
-                x_num_future_scaled = self.feature_scaler.transform(x_num_future_np)
+                x_num_future_scaled = self.feature_scaler.transform(x["x_num_future"].numpy())
                 x["x_num_future"] = torch.from_numpy(x_num_future_scaled).float()
 
         # Apply target scaling if enabled
         if self.scale_targets and self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
-            y_np = y.numpy()
-            y_scaled = self.target_scaler.transform(y_np)
+            y_scaled = self.target_scaler.transform(y.numpy())
             y = torch.from_numpy(y_scaled).float()
             x["y"] = y  # Update y in x dict as well
 
@@ -377,13 +373,13 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.info(f"Auto-running setup() with split_config: {split_config}")
             self.setup(train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio)
 
-    def fit_scaler(self, dataset):
+    def _fit_scaler_direct_d1(self, train_indices):
         """
-        Fit the scaler on numeric features from the given dataset.
-        Uses batches for efficiency in both partial_fit and fit modes.
+        Optimized scaler fitting for memory_efficient=False.
+        Directly accesses cached D1 data without going through D2 __getitem__.
 
         Args:
-            dataset: Training dataset to fit the scaler on
+            train_indices: List of D2 window indices for training
         """
         if self.feature_scaler is None:
             logger.info("No scaling method specified, skipping scaler fitting")
@@ -391,84 +387,128 @@ class EncoderDecoder(pl.LightningDataModule):
 
         import numpy as np
 
-        # Use DataLoader for efficient batch processing
-        # Larger batch size improves performance
-        dataloader = DataLoader(dataset, batch_size=64, shuffle=False, collate_fn=custom_collate_fn)
+        logger.info(f"Fitting {self.scaling_method} scaler directly on cached D1 data...")
 
-        use_partial_fit = self.memory_efficient
+        # Get metadata
+        meta = getattr(self.d1_dataset, "metadata", {})
+        idx_categorical = list(meta.get("idx_categorical", []))
+        feature_cols = meta.get("feature_cols", [])
+        n_features_total = len(feature_cols)
+        idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
 
-        if use_partial_fit:
-            logger.info(f"Fitting {self.scaling_method} scaler using partial_fit (memory-efficient mode)...")
+        # Identify unique D1 group indices needed for training windows
+        group_indices_needed = sorted(list(set(self.valid_windows[idx]["group_idx"] for idx in train_indices)))
 
-            for batch in dataloader:
-                # Batch is a dictionary with batched tensors
+        logger.info(f"  Accessing {len(group_indices_needed)} unique D1 groups for {len(train_indices)} training windows")
 
-                # Combine past and future numeric features for fitting
-                numeric_features_batch = []
-                if "x_num_past" in batch and batch["x_num_past"].numel() > 0:
-                    numeric_features_batch.append(batch["x_num_past"])
-                if "x_num_future" in batch and batch["x_num_future"].numel() > 0:
-                    numeric_features_batch.append(batch["x_num_future"])
+        # Extract RAW numerical data directly from D1 cache
+        all_features_list = []
+        all_targets_list = []
 
-                # Fit feature scaler on the combined batch
-                if numeric_features_batch:
-                    # Shape: (batch_size, seq_len, num_features) -> (batch_size * seq_len, num_features)
-                    combined_features = torch.cat(numeric_features_batch, dim=1)
-                    features_np = combined_features.reshape(-1, combined_features.shape[-1]).numpy()
-                    if features_np.size > 0:
-                        self.feature_scaler.partial_fit(features_np)
+        for group_idx in group_indices_needed:
+            # Get D1 data (will use cache if available, otherwise load)
+            group_data = self.d1_dataset[group_idx]
 
-                # Fit target scaler if requested
-                if self.scale_targets and self.target_scaler is not None:
-                    if "y" in batch and batch["y"].numel() > 0:
-                        targets_np = batch["y"].reshape(-1, batch["y"].shape[-1]).numpy()
-                        self.target_scaler.partial_fit(targets_np)
+            # Extract numeric columns from 'x' tensor
+            if idx_num and "x" in group_data:
+                numeric_data = group_data["x"][:, idx_num].numpy()
+                all_features_list.append(numeric_data)
 
-            logger.info(f"Scaler fitted successfully on {len(dataset)} samples using partial_fit")
+            # Extract targets if scaling targets
+            if self.scale_targets and "y" in group_data:
+                all_targets_list.append(group_data["y"].numpy())
 
-        else:  # Batch mode (fit)
-            logger.info(f"Fitting {self.scaling_method} scaler on training data (batch mode)...")
+        # Fit feature scaler on concatenated raw data
+        if all_features_list:
+            features_array = np.concatenate(all_features_list, axis=0)
+            self.feature_scaler.fit(features_array)
+            logger.info(
+                f"  Feature scaler fitted on {features_array.shape[0]} total D1 timesteps with {features_array.shape[1]} features"
+            )
 
-            all_features_list = []
-            all_targets_list = []
-
-            for batch in dataloader:
-                # Combine past and future numeric features
-                numeric_features_batch = []
-                if "x_num_past" in batch and batch["x_num_past"].numel() > 0:
-                    numeric_features_batch.append(batch["x_num_past"])
-                if "x_num_future" in batch and batch["x_num_future"].numel() > 0:
-                    numeric_features_batch.append(batch["x_num_future"])
-
-                if numeric_features_batch:
-                    combined_features = torch.cat(numeric_features_batch, dim=1)
-                    all_features_list.append(combined_features.numpy())
-
-                if self.scale_targets and "y" in batch and batch["y"].numel() > 0:
-                    all_targets_list.append(batch["y"].numpy())
-
-            # Fit feature scaler on all collected data
-            if all_features_list:
-                features_array = np.concatenate(all_features_list, axis=0)
-                features_array = features_array.reshape(-1, features_array.shape[-1])
-                self.feature_scaler.fit(features_array)
-                logger.info(
-                    f"Feature scaler fitted on {features_array.shape[0]} total timesteps with {features_array.shape[1]} features"
-                )
-
-            # Fit target scaler
-            if self.scale_targets and self.target_scaler and all_targets_list:
-                targets_array = np.concatenate(all_targets_list, axis=0)
-                targets_array = targets_array.reshape(-1, targets_array.shape[-1])
-                self.target_scaler.fit(targets_array)
-                logger.info(
-                    f"Target scaler fitted on {targets_array.shape[0]} total timesteps with {targets_array.shape[1]} targets"
-                )
+        # Fit target scaler
+        if self.scale_targets and self.target_scaler and all_targets_list:
+            targets_array = np.concatenate(all_targets_list, axis=0)
+            self.target_scaler.fit(targets_array)
+            logger.info(
+                f"  Target scaler fitted on {targets_array.shape[0]} total D1 timesteps with {targets_array.shape[1]} targets"
+            )
 
         self.is_scaler_fitted = True
 
-        # Attach fitted scalers to the main dataset for on-the-fly transformation
-        # This ensures scaling works even when fit_scaler is called directly (not via split_data)
+    def _fit_scaler_batched(self, train_indices):
+        """
+        Optimized scaler fitting using partial_fit with direct D1 cache access (for memory_efficient=True).
+        Args:
+            train_indices: List of D2 window indices for training
+        """
+        if self.feature_scaler is None:
+            logger.info("No scaling method specified, skipping scaler fitting")
+            return
+
+        logger.info(f"Fitting {self.scaling_method} scaler using partial_fit with direct D1 access (memory-efficient mode)...")
+
+        # Get metadata
+        meta = getattr(self.d1_dataset, "metadata", {})
+        idx_categorical = list(meta.get("idx_categorical", []))
+        feature_cols = meta.get("feature_cols", [])
+        n_features_total = len(feature_cols)
+        idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
+
+        # Identify unique D1 group indices needed for training windows
+        group_indices_needed = sorted(list(set(self.valid_windows[idx]["group_idx"] for idx in train_indices)))
+
+        logger.info(f"  Processing {len(group_indices_needed)} unique D1 groups for {len(train_indices)} training windows")
+        logger.info("  Using partial_fit to minimize memory footprint")
+
+        # Process each D1 group separately (memory-efficient)
+        for group_num, group_idx in enumerate(group_indices_needed):
+            if group_num % max(1, len(group_indices_needed) // 10) == 0:
+                logger.info(
+                    f"  Processing group {group_num + 1}/{len(group_indices_needed)} ({100 * (group_num + 1) / len(group_indices_needed):.1f}%)"  # noqa
+                )
+
+            # Get D1 data (will use cache if available, otherwise load)
+            group_data = self.d1_dataset[group_idx]
+
+            # Extract numeric columns
+            if idx_num and "x" in group_data:
+                numeric_data = group_data["x"][:, idx_num].numpy()
+
+                # Partial fit on this group's data
+                if numeric_data.size > 0:
+                    self.feature_scaler.partial_fit(numeric_data)
+
+            # Extract targets if scaling targets
+            if self.scale_targets and self.target_scaler is not None and "y" in group_data:
+                target_data = group_data["y"].numpy()
+                if target_data.size > 0:
+                    self.target_scaler.partial_fit(target_data)
+
+        logger.info(f"Scaler fitted successfully on {len(group_indices_needed)} groups using partial_fit")
+        self.is_scaler_fitted = True
+
+    def fit_scaler(self, train_indices):
+        """
+        Fit the scaler on training data using direct D1 cache access.
+        Delegates to the appropriate method based on memory_efficient mode.
+
+        Args:
+            train_indices: List of D2 window indices for training
+        """
+        if self.feature_scaler is None:
+            logger.info("No scaling method specified, skipping scaler fitting")
+            return
+
+        # Both modes now use direct D1 access!
+        if not self.memory_efficient:
+            # Direct D1 access with single fit() call
+            self._fit_scaler_direct_d1(train_indices)
+        else:
+            # Direct D1 access with partial_fit() for memory efficiency
+            self._fit_scaler_batched(train_indices)
+
+        # Attach fitted scalers to dataset
         if self.is_scaler_fitted:
             logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
             self.dataset.feature_scaler = self.feature_scaler
@@ -481,6 +521,7 @@ class EncoderDecoder(pl.LightningDataModule):
 
         Args:
             data: Data to inverse transform (numpy array or torch tensor)
+                  Can be 2D [samples, features] or 3D [batch, time, features]
             data_type: Type of data ('features' or 'targets')
 
         Returns:
@@ -506,8 +547,19 @@ class EncoderDecoder(pl.LightningDataModule):
         else:
             data_np = data
 
+        # Handle 3D arrays [batch, time, features] by reshaping to 2D
+        original_shape = data_np.shape
+        if data_np.ndim == 3:
+            # Reshape [batch, time, features] -> [batch*time, features]
+            batch_size, time_steps, n_features = data_np.shape
+            data_np = data_np.reshape(-1, n_features)
+
         # Apply inverse transform
         data_inverse = scaler.inverse_transform(data_np)
+
+        # Reshape back to original shape if needed
+        if len(original_shape) == 3:
+            data_inverse = data_inverse.reshape(original_shape)
 
         # Convert back to tensor if input was tensor
         if is_tensor:
@@ -602,24 +654,176 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info("Pre-transformation complete!")
         return train_transformed, val_transformed, test_transformed
 
-    def _pretransform_dataset(self, dataset):
+    def _pretransform_dataset_direct(self, indices):
         """
-        Pre-transform a single dataset by applying scaling to all samples.
+        Pre-transform dataset by directly accessing D1 data
+
         Args:
-            dataset: Dataset to pre-transform
+            indices: List of window indices to extract
         Returns:
             PreTransformedDataset wrapper with cached transformed data
         """
-        from .utils import PreTransformedDataset
+        import numpy as np
 
-        # Transform all samples and cache them
-        transformed_samples = []
-        for i in range(len(dataset)):
-            x, y = dataset[i]
-            transformed_samples.append((x, y))
+        logger.info(f"Pre-transforming {len(indices)} samples (direct D1 access, no __getitem__)...")
 
-        # Return a wrapper that serves pre-transformed data
-        return PreTransformedDataset(transformed_samples)
+        # Get D1 metadata
+        meta = getattr(self.d1_dataset, "metadata", {}) or {}
+        idx_categorical = list(meta.get("idx_categorical", []))
+        feature_cols = meta.get("feature_cols", [])
+        enrich_cat = meta.get("enrich_cat", [])
+        idx_future = list(meta.get("idx_future", []))
+        idx_targets_full = list(meta.get("idx_targets", []))
+        global_forecasting = meta.get("global_forecasting", True)
+
+        # Ensure temporal features are categorical
+        if enrich_cat and feature_cols:
+            for temporal_feature in enrich_cat:
+                if temporal_feature in feature_cols:
+                    feature_idx = feature_cols.index(temporal_feature)
+                    if feature_idx not in idx_categorical:
+                        idx_categorical.append(feature_idx)
+
+        # Determine numeric indices
+        n_features = int(meta.get("n_features", 0))
+        all_idx = list(range(n_features))
+        idx_num = [i for i in all_idx if i not in idx_categorical]
+
+        # ULTRA-FAST EXTRACTION: Use index range instead of individual windows
+        logger.info("  Extracting data using index range (ultra-fast)...")
+
+        # Get D1 data once
+        group_sample = self.d1_dataset[0]  # Assuming single group
+        X_full = group_sample["x"].numpy()  # Convert to numpy once
+        y_full = group_sample["y"].numpy()
+
+        # Find the data range we need (minimum start to maximum end across all windows)
+        # This handles both contiguous and non-contiguous window indices
+        all_starts = [self.valid_windows[idx]["start_idx"] for idx in indices]
+        all_ends = [self.valid_windows[idx]["start_idx"] + self.past_len + self.future_len for idx in indices]
+
+        first_start = min(all_starts)
+        last_end = min(max(all_ends), len(X_full))
+
+        # Extract the entire data range at once (single slice!)
+        X_range = X_full[first_start:last_end]  # Shape: (total_timesteps, n_features)
+        y_range = y_full[first_start:last_end]  # Shape: (total_timesteps, n_targets)
+
+        logger.info(f"  Extracted data range [{first_start}:{last_end}] = {last_end - first_start} timesteps")
+
+        # Now extract windows from this range using relative indices
+        window_starts = np.array([self.valid_windows[idx]["start_idx"] - first_start for idx in indices])
+
+        # Create index arrays for ALL windows
+        past_indices = window_starts[:, None] + np.arange(self.past_len)[None, :]
+        future_indices = (window_starts[:, None] + self.past_len) + np.arange(self.future_len)[None, :]
+
+        # Extract ALL windows at once using advanced indexing
+        X_past_all = X_range[past_indices]  # (n_windows, past_len, n_features)
+        X_future_all = X_range[future_indices]  # (n_windows, future_len, n_features)
+        y_future_all = y_range[future_indices]  # (n_windows, future_len, n_targets)
+
+        # Extract numeric features for ALL windows at once
+        if len(idx_num) > 0:
+            all_x_num_past = X_past_all[:, :, idx_num]
+
+            future_num_idx = [i for i in idx_future if i in idx_num]
+            if len(future_num_idx) > 0:
+                all_x_num_future = X_future_all[:, :, future_num_idx]
+            else:
+                all_x_num_future = None
+        else:
+            all_x_num_past = None
+            all_x_num_future = None
+
+        # Store targets and categorical features
+        all_y = y_future_all
+        all_X_past = X_past_all
+        all_X_future = X_future_all
+
+        logger.info(f"  Extracted {len(indices)} windows in single vectorized operation")
+
+        # Transform ALL numeric features in one shot (already vectorized!)
+        logger.info("  Applying scaling transformation (single call, fully vectorized)...")
+
+        if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
+            # Transform x_num_past - already a numpy array (n_windows, past_len, n_features)
+            if all_x_num_past is not None:
+                original_shape = all_x_num_past.shape
+                # Reshape to 2D: (n_windows * past_len, n_features)
+                reshaped = all_x_num_past.reshape(-1, original_shape[-1])
+                # Transform ALL at once - SINGLE CALL!
+                transformed = self.feature_scaler.transform(reshaped)
+                # Reshape back: (n_windows, past_len, n_features)
+                all_x_num_past = transformed.reshape(original_shape)
+                logger.info(
+                    f" Transformed {len(indices)} windows × {self.past_len} timesteps= {reshaped.shape[0]} values in single call"
+                )
+
+            # Transform x_num_future
+            if all_x_num_future is not None:
+                original_shape = all_x_num_future.shape
+                reshaped = all_x_num_future.reshape(-1, original_shape[-1])
+                transformed = self.feature_scaler.transform(reshaped)
+                all_x_num_future = transformed.reshape(original_shape)
+
+        # Transform targets if enabled
+        if self.scale_targets and self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
+            logger.info("  Applying target scaling (single call, fully vectorized)...")
+            original_shape = all_y.shape
+            reshaped = all_y.reshape(-1, original_shape[-1])
+            transformed_y = self.target_scaler.transform(reshaped)
+            all_y = transformed_y.reshape(original_shape)
+
+        # Pre-compute future categorical indices once
+        future_cat_indices = []
+        if len(idx_categorical) > 0:
+            if enrich_cat and feature_cols:
+                for temporal_feature in enrich_cat:
+                    if temporal_feature in feature_cols:
+                        feature_idx = feature_cols.index(temporal_feature)
+                        if feature_idx in idx_categorical and feature_idx not in future_cat_indices:
+                            future_cat_indices.append(feature_idx)
+
+            if len(idx_future) > 0:
+                future_cat_idx = [i for i in idx_future if i in idx_categorical]
+                for idx in future_cat_idx:
+                    if idx not in future_cat_indices:
+                        future_cat_indices.append(idx)
+
+        # Pre-compute idx_target mapping once
+        num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
+        mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
+        idx_target_tensor = torch.tensor(mapped_targets, dtype=torch.long)
+
+        # Return vectorized dataset (creates dicts on-demand in __getitem__)
+        logger.info(f"✅ Pre-transformation complete: {len(indices)} samples ready (vectorized storage)")
+        from .utils import VectorizedPreTransformedDataset
+
+        return VectorizedPreTransformedDataset(
+            all_x_num_past,
+            all_x_num_future,
+            all_X_past,
+            all_X_future,
+            all_y,
+            indices,
+            self.valid_windows,
+            idx_categorical,
+            future_cat_indices,
+            idx_target_tensor,
+            global_forecasting,
+            meta,
+        )
+
+    def _pretransform_dataset(self, dataset):
+        """Wrapper that delegates to direct D1 access method."""
+        # Extract indices from the dataset subset
+        if hasattr(dataset, "indices"):
+            indices = dataset.indices
+        else:
+            indices = list(range(len(dataset)))
+
+        return self._pretransform_dataset_direct(indices)
 
     def _create_group_temporal_splits(self, train_ratio, val_ratio, test_ratio):
         """
@@ -721,7 +925,10 @@ class EncoderDecoder(pl.LightningDataModule):
         # Step 3: Fit scaler and apply transformation strategy
         if self.scaling_method is not None:
             logger.info(f"Fitting {self.scaling_method} scaler on training data...")
-            self.fit_scaler(train_dataset)
+
+            # Both modes now use direct D1 access with train_indices!
+            self.fit_scaler(train_indices)
+
             self.is_scaler_fitted = True
 
             # Step 4: Apply transformation based on memory_efficient flag
