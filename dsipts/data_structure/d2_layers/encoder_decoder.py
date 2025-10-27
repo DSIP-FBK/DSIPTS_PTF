@@ -693,8 +693,8 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info("  Extracting data using index range (ultra-fast)...")
 
         # Get D1 data once
-        group_sample = self.d1_dataset[0]  # Assuming single group
-        X_full = group_sample["x"].numpy()  # Convert to numpy once
+        group_sample = self.d1_dataset[0]
+        X_full = group_sample["x"].numpy()
         y_full = group_sample["y"].numpy()
 
         # Find the data range we need (minimum start to maximum end across all windows)
@@ -706,8 +706,8 @@ class EncoderDecoder(pl.LightningDataModule):
         last_end = min(max(all_ends), len(X_full))
 
         # Extract the entire data range at once (single slice!)
-        X_range = X_full[first_start:last_end]  # Shape: (total_timesteps, n_features)
-        y_range = y_full[first_start:last_end]  # Shape: (total_timesteps, n_targets)
+        X_range = X_full[first_start:last_end]
+        y_range = y_full[first_start:last_end]
 
         logger.info(f"  Extracted data range [{first_start}:{last_end}] = {last_end - first_start} timesteps")
 
@@ -719,9 +719,9 @@ class EncoderDecoder(pl.LightningDataModule):
         future_indices = (window_starts[:, None] + self.past_len) + np.arange(self.future_len)[None, :]
 
         # Extract ALL windows at once using advanced indexing
-        X_past_all = X_range[past_indices]  # (n_windows, past_len, n_features)
-        X_future_all = X_range[future_indices]  # (n_windows, future_len, n_features)
-        y_future_all = y_range[future_indices]  # (n_windows, future_len, n_targets)
+        X_past_all = X_range[past_indices]
+        X_future_all = X_range[future_indices]
+        y_future_all = y_range[future_indices]
 
         # Extract numeric features for ALL windows at once
         if len(idx_num) > 0:
@@ -840,7 +840,6 @@ class EncoderDecoder(pl.LightningDataModule):
         val_windows = []
         test_windows = []
 
-        # Group windows by group_id
         from collections import defaultdict
 
         windows_by_group = defaultdict(list)
@@ -854,16 +853,15 @@ class EncoderDecoder(pl.LightningDataModule):
         for group_id, window_indices in windows_by_group.items():
             n_windows = len(window_indices)
 
-            # Calculate split points for this group
             train_end = int(n_windows * train_ratio)
             val_end = int(n_windows * (train_ratio + val_ratio))
 
-            # Assign windows to splits
             train_windows.extend(window_indices[:train_end])
             val_windows.extend(window_indices[train_end:val_end])
             test_windows.extend(window_indices[val_end:])
 
-        logger.debug(f"Group splits: {len(train_windows)} train, {len(val_windows)} val, {len(test_windows)} test windows")
+        logger.debug(f"Group splits: {len(train_windows)} train, \
+            {len(val_windows)} val, {len(test_windows)} test windows")
 
         return train_windows, val_windows, test_windows
 
@@ -872,11 +870,13 @@ class EncoderDecoder(pl.LightningDataModule):
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
         test_ratio: float = 0.15,
+        scaling_method: str = None,
     ):
         """
-        Setup method: splits data, fits scaler, and prepares datasets.
-        Handles:
-        1. Splitting data based on split_method ('percentage' or 'group')
+        Set up train/val/test splits and fit scaler.
+
+        This method performs:
+        1. Splitting data into train/val/test
         2. Fitting scaler on training data
         3. Transformation strategy based on memory_efficient:
            - memory_efficient= False: pre-transforms all data upfront (faster inference)
@@ -886,11 +886,37 @@ class EncoderDecoder(pl.LightningDataModule):
             train_ratio: Ratio of data for training (default: 0.7)
             val_ratio: Ratio of data for validation (default: 0.15)
             test_ratio: Ratio of data for testing (default: 0.15)
+            scaling_method: Optional scaling method to apply. If provided, overrides the
+                          scaling_method set during __init__. Use this to defer scaling
+                          until setup() is called. Options: 'standard', 'minmax', None
         """
-        # Skip if already set up
-        if self.train_dataset is not None:
+        # Allow re-setup if scaling_method is provided (deferred scaling)
+        if self.train_dataset is not None and scaling_method is None:
             logger.info("Datasets already set up, skipping setup()")
             return
+
+        # Update scaling_method if provided
+        if scaling_method is not None:
+            if self.scaling_method is not None and self.scaling_method != scaling_method:
+                logger.warning(f"Overriding scaling_method from '{self.scaling_method}' to '{scaling_method}'")
+            self.scaling_method = scaling_method
+            # Re-initialize scaler with new method
+            if scaling_method == "standard":
+                from sklearn.preprocessing import StandardScaler
+
+                self.feature_scaler = StandardScaler()
+                if self.scale_targets:
+                    self.target_scaler = StandardScaler()
+            elif scaling_method == "minmax":
+                from sklearn.preprocessing import MinMaxScaler
+
+                self.feature_scaler = MinMaxScaler()
+                if self.scale_targets:
+                    self.target_scaler = MinMaxScaler()
+            else:
+                self.feature_scaler = None
+                self.target_scaler = None
+            logger.info(f"Scaling method set to: {scaling_method}")
 
         # Verify ratios sum to 1
         ratio_sum = train_ratio + val_ratio + test_ratio
@@ -930,6 +956,7 @@ class EncoderDecoder(pl.LightningDataModule):
             self.fit_scaler(train_indices)
 
             self.is_scaler_fitted = True
+            logger.info(f"✅ Scaler fitted successfully (is_scaler_fitted={self.is_scaler_fitted})")
 
             # Step 4: Apply transformation based on memory_efficient flag
             if not self.memory_efficient:
@@ -942,6 +969,8 @@ class EncoderDecoder(pl.LightningDataModule):
                 self.dataset.feature_scaler = self.feature_scaler
                 self.dataset.target_scaler = self.target_scaler
                 self.dataset.scale_targets = self.scale_targets
+        else:
+            logger.info("No scaling method specified, skipping scaler fitting")
 
         # Step 5: Store datasets
         self.train_dataset = train_dataset
