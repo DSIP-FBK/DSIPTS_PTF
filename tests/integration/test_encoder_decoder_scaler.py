@@ -122,8 +122,12 @@ def test_standard_scaler():
         batch_size=16,
         scaling_method="standard",
         scale_targets=False,
-        split_config=(0.7, 0.15, 0.15),
+        split_ratio=(0.7, 0.15, 0.15),
     )
+
+    # Setup to fit scaler and create splits
+    d2_dataset.setup(stage="fit")  # Creates train + val
+    d2_dataset.setup(stage="test")  # Creates test
 
     # Check that the scaler is fitted
     assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after setup"
@@ -250,10 +254,12 @@ def test_custom_scaler():
         batch_size=16,
         scaling_method="minmax",
         scale_targets=False,
+        split_ratio=(0.7, 0.15, 0.15),
     )
 
-    # Setup with split config
-    d2_dataset.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+    # Setup to fit scaler and create splits
+    d2_dataset.setup(stage="fit")  # Creates train + val
+    d2_dataset.setup(stage="test")  # Creates test
 
     # Check that the scaler is fitted
     assert d2_dataset.is_scaler_fitted, "Scaler should be fitted after setup"
@@ -347,10 +353,12 @@ def test_target_scaling():
         batch_size=16,
         scaling_method="standard",
         scale_targets=True,
+        split_ratio=(0.7, 0.15, 0.15),
     )
 
-    # Setup with split config
-    d2_dataset.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+    # Setup to fit scaler and create splits
+    d2_dataset.setup(stage="fit")  # Creates train + val
+    d2_dataset.setup(stage="test")  # Creates test
 
     # Check that both scalers are fitted
     assert d2_dataset.is_scaler_fitted, "Feature scaler should be fitted after setup"
@@ -474,8 +482,187 @@ def test_target_scaling():
     logger.info("Target scaling test passed!")
 
 
+def test_no_scaling():
+    """Test that data remains unscaled when scaling_method=None."""
+    logger.info("\n\nTesting no scaling functionality in EncoderDecoder")
+
+    # Create test data
+    csv_path, original_df = create_test_data()
+
+    # Create D1 dataset
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=[csv_path],
+        time_col="time",
+        num_cols=["feature1", "feature2", "feature3"],
+        target_cols=["target1", "target2"],
+    )
+
+    # Create D2 dataset WITHOUT scaling
+    d2_dataset = EncoderDecoder(
+        d1_dataset=d1_dataset,
+        past_len=24,
+        future_len=12,
+        batch_size=16,
+        scaling_method=None,
+        scale_targets=False,
+        split_ratio=(0.7, 0.15, 0.15),
+    )
+
+    # Setup
+    d2_dataset.setup(stage="fit")
+
+    # Check that no scaler is fitted
+    assert d2_dataset.feature_scaler is None, "Feature scaler should be None when scaling_method=None"
+    assert d2_dataset.target_scaler is None, "Target scaler should be None when scale_targets=False"
+
+    # Get a sample
+    train_sample, train_target = d2_dataset.train_dataset[0]
+    train_features = train_sample["x_num_past"].numpy()
+
+    # Check that values are NOT scaled (should be in original range)
+    # Original data has feature1 ~ N(0, 1), feature2 ~ N(10, 5), feature3 ~ N(-5, 2)
+    mean_feature2 = np.mean(train_features[:, 1])
+    logger.info(f"\nUnscaled feature2 mean: {mean_feature2:.2f} (should be ~10)")
+
+    # Feature2 should be around 10, not around 0
+    assert abs(mean_feature2 - 10) < 5, f"Feature2 should be unscaled (~10), got {mean_feature2}"
+
+    logger.info("No scaling test passed!")
+
+
+def test_scaled_vs_unscaled_comparison():
+    """Compare scaled vs unscaled values side-by-side."""
+    logger.info("\n\nTesting scaled vs unscaled comparison")
+
+    # Create test data
+    csv_path, original_df = create_test_data()
+
+    # Create D1 dataset
+    d1_dataset = MultiSourceTSDataSet(
+        file_paths=[csv_path],
+        time_col="time",
+        num_cols=["feature1", "feature2", "feature3"],
+        target_cols=["target1", "target2"],
+    )
+
+    # Create D2 WITHOUT scaling
+    d2_unscaled = EncoderDecoder(
+        d1_dataset=d1_dataset,
+        past_len=24,
+        future_len=12,
+        batch_size=16,
+        scaling_method=None,
+        scale_targets=False,
+        split_ratio=(0.7, 0.15, 0.15),
+    )
+    d2_unscaled.setup(stage="fit")
+
+    # Create D2 WITH StandardScaler
+    d2_scaled = EncoderDecoder(
+        d1_dataset=d1_dataset,
+        past_len=24,
+        future_len=12,
+        batch_size=16,
+        scaling_method="standard",
+        scale_targets=True,
+        split_ratio=(0.7, 0.15, 0.15),
+    )
+    d2_scaled.setup(stage="fit")
+
+    # Get samples from training data
+    x_unscaled, y_unscaled = d2_unscaled.train_dataset[0]
+    x_scaled, y_scaled = d2_scaled.train_dataset[0]
+
+    # Compare statistics
+    unscaled_mean = x_unscaled["x_num_past"].mean().item()
+    scaled_mean = x_scaled["x_num_past"].mean().item()
+
+    logger.info(f"\nUnscaled x_num_past mean: {unscaled_mean:.2f}")
+    logger.info(f"Scaled x_num_past mean: {scaled_mean:.2f}")
+
+    # Unscaled should NOT be close to 0, scaled should be close to 0
+    assert abs(unscaled_mean) > 1.0, f"Unscaled mean should not be ~0, got {unscaled_mean}"
+    assert abs(scaled_mean) < 1.0, f"Scaled mean should be ~0, got {scaled_mean}"
+
+    logger.info("Scaled vs unscaled comparison test passed!")
+
+
+def test_memory_efficient_modes_consistency():
+    """Test that scaling is consistent across memory_efficient modes."""
+    logger.info("\n\nTesting scaling consistency across memory_efficient modes")
+
+    # Create test data
+    csv_path, original_df = create_test_data()
+
+    # Mode 1: memory_efficient=False (pre-transform)
+    d1_precompute = MultiSourceTSDataSet(
+        file_paths=[csv_path],
+        time_col="time",
+        num_cols=["feature1", "feature2", "feature3"],
+        target_cols=["target1", "target2"],
+        memory_efficient=False,
+    )
+
+    d2_precompute = EncoderDecoder(
+        d1_dataset=d1_precompute,
+        past_len=24,
+        future_len=12,
+        batch_size=16,
+        scaling_method="standard",
+        scale_targets=True,
+        split_ratio=(0.7, 0.15, 0.15),
+    )
+    d2_precompute.setup(stage="fit")
+
+    # Mode 2: memory_efficient=True (on-the-fly)
+    d1_onthefly = MultiSourceTSDataSet(
+        file_paths=[csv_path],
+        time_col="time",
+        num_cols=["feature1", "feature2", "feature3"],
+        target_cols=["target1", "target2"],
+        memory_efficient=True,
+    )
+
+    d2_onthefly = EncoderDecoder(
+        d1_dataset=d1_onthefly,
+        past_len=24,
+        future_len=12,
+        batch_size=16,
+        scaling_method="standard",
+        scale_targets=True,
+        split_ratio=(0.7, 0.15, 0.15),
+    )
+    d2_onthefly.setup(stage="fit")
+
+    # Compare scaler parameters
+    scaler_mean_1 = d2_precompute.feature_scaler.mean_
+    scaler_mean_2 = d2_onthefly.feature_scaler.mean_
+
+    logger.info(f"\nMode 1 (pre-transform) scaler mean: {scaler_mean_1}")
+    logger.info(f"Mode 2 (on-the-fly) scaler mean: {scaler_mean_2}")
+
+    # Scaler parameters should match
+    assert np.allclose(scaler_mean_1, scaler_mean_2, rtol=1e-5), "Scaler parameters should match across modes"
+
+    # Get same window from both
+    x1, y1 = d2_precompute.train_dataset[0]
+    x2, y2 = d2_onthefly.train_dataset[0]
+
+    # Scaled values should match
+    assert np.allclose(
+        x1["x_num_past"].numpy(), x2["x_num_past"].numpy(), rtol=1e-5, atol=1e-7
+    ), "Scaled values should match across memory_efficient modes"
+
+    logger.info("Memory efficient modes consistency test passed!")
+
+
 if __name__ == "__main__":
     test_standard_scaler()
     test_custom_scaler()
     test_target_scaling()
-    logger.info("All tests passed!")
+    test_no_scaling()
+    test_scaled_vs_unscaled_comparison()
+    test_memory_efficient_modes_consistency()
+    logger.info("\n\n" + "=" * 80)
+    logger.info("ALL SCALING TESTS PASSED!")
+    logger.info("=" * 80)

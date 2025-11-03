@@ -6,8 +6,10 @@ structures from D1 layer data. Handles data scaling as well.
 """
 
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -33,6 +35,8 @@ class EncoderDecoderDataset(Dataset):
         cont_feature_cols: List[str] = None,
         cat_feature_cols: List[str] = None,
         include_target_in_decoder: bool = False,
+        use_cache: bool = True,
+        cache_size: int = 32000,
     ):
         """Initialize encoder-decoder dataset."""
 
@@ -44,11 +48,16 @@ class EncoderDecoderDataset(Dataset):
         self.cat_cols = cat_cols or []
         self.cont_feature_cols = cont_feature_cols or []
         self.include_target_in_decoder = include_target_in_decoder
+        self.use_cache = use_cache
+        self.cache_size = cache_size
 
         # Scaler placeholders - will be set by EncoderDecoder after fitting
         self.feature_scaler = None
         self.target_scaler = None
-        self.scale_targets = False
+
+        # Setup LRU cache for transformed windows if enabled
+        if self.use_cache:
+            self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_transformed_window_impl)
 
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
@@ -63,9 +72,16 @@ class EncoderDecoderDataset(Dataset):
         """Return the number of valid windows."""
         return len(self.valid_windows)
 
-    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+    def _get_transformed_window_impl(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
-        Get a sample with encoder-decoder structure.
+        Internal method to get and transform a window (cacheable).
+        This is the expensive part that benefits from caching.
+        """
+        return self._get_window_no_cache(idx)
+
+    def _get_window_no_cache(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+        """
+        Get a sample with encoder-decoder structure (no caching).
         """
         window = self.valid_windows[idx]
         group_idx = window["group_idx"]
@@ -209,18 +225,82 @@ class EncoderDecoderDataset(Dataset):
                 x_num_past_scaled = self.feature_scaler.transform(x["x_num_past"].numpy())
                 x["x_num_past"] = torch.from_numpy(x_num_past_scaled).float()
 
+                # -------------------------------------------------
+                # TODO: DELETE THIS ONE‑TIME LOGGING OF TRANSFORMED FEATURE VALUES
+                # -------------------------------------------------
+                if not getattr(self, "_logged_transform", False):
+                    # Show the first 5 rows (or fewer if the tensor is smaller)
+                    rows = min(5, x["x_num_past"].shape[0])
+                    logger.info(
+                        f"[Scaler] First {rows} rows of transformed FEATURES (x_num_past) – raw values:\n"
+                        f"{x['x_num_past'][:rows].cpu().numpy()}"
+                    )
+                    # Mark that we have already logged – prevents repeated output
+                    self._logged_transform = True
+
             # Scale x_num_future (if present)
             if "x_num_future" in x and x["x_num_future"].numel() > 0:
                 x_num_future_scaled = self.feature_scaler.transform(x["x_num_future"].numpy())
                 x["x_num_future"] = torch.from_numpy(x_num_future_scaled).float()
 
-        # Apply target scaling if enabled
-        if self.scale_targets and self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
-            y_scaled = self.target_scaler.transform(y.numpy())
-            y = torch.from_numpy(y_scaled).float()
-            x["y"] = y  # Update y in x dict as well
+                # -------------------------------------------------
+                # TODO: DELETE THIS ONE‑TIME LOGGING OF TRANSFORMED FEATURE VALUES
+                # -------------------------------------------------
+                if not getattr(self, "_logged_transform", False):
+                    # Show the first 5 rows (or fewer if the tensor is smaller)
+                    rows = min(5, x["x_num_future"].shape[0])
+                    logger.info(
+                        f"[Scaler] First {rows} rows of transformed FEATURES (x_num_future) – raw values:\n"
+                        f"{x['x_num_future'][:rows].cpu().numpy()}"
+                    )
+                    # Mark that we have already logged – prevents repeated output
+                    self._logged_transform = True
+
+            # ONE‑TIME LOGGING OF TRANSFORMED FEATURE VALUES
+            # -------------------------------------------------
+            if not getattr(self, "_logged_transform", False):
+                # Show the first 5 rows (or fewer if the tensor is smaller)
+                rows = min(5, x["x_num_future"].shape[0])
+                logger.info(
+                    f"[Scaler] First {rows} rows of transformed FEATURES (x_num_future) – raw values:\n"
+                    f"{x['x_num_future'][:rows].cpu().numpy()}"
+                )
+                # Mark that we have already logged – prevents repeated output
+                self._logged_transform = True
+
+        # Apply target scaling if enabled and y contains data
+        # We check that the scaler exists, has a `transform` method, and that y is a non‑empty tensor.
+        if (
+            self.target_scaler is not None
+            and hasattr(self.target_scaler, "transform")
+            and isinstance(y, torch.Tensor)
+            and y.numel() > 0
+        ):
+            # Transform y using the scaler and convert back to a torch tensor
+            y = torch.from_numpy(self.target_scaler.transform(y.numpy())).float()
+            x["y"] = y
+
+            # -------------------------------------------------
+            # TODO: DELETE THIS ONE‑TIME LOGGING OF TRANSFORMED TARGET VALUES
+            # -------------------------------------------------
+            if not getattr(self, "_logged_transform", False):
+                # Show the first 5 rows (or fewer if the tensor is smaller)
+                rows = min(5, y.shape[0])
+                logger.info(f"[Scaler] First {rows} rows of transformed TARGET (y) – raw values:\n{y[:rows].cpu().numpy()}")
+                # Mark that we have already logged – prevents repeated output
+                self._logged_transform = True
 
         return x, y
+
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
+        """
+        Get a sample with encoder-decoder structure.
+        Uses LRU cache if enabled to avoid redundant window extraction and processing.
+        """
+        if self.use_cache:
+            return self._get_transformed_window(idx)
+        else:
+            return self._get_window_no_cache(idx)
 
 
 class EncoderDecoderSubset:
@@ -253,11 +333,10 @@ class EncoderDecoder(pl.LightningDataModule):
         batch_size: int = 32,
         step_size: int = 1,
         min_valid_length: Optional[int] = None,
-        split_method: str = "percentage",
-        split_config: Optional[Tuple] = None,
+        split_ratio: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+        split_group_config: Optional[Tuple[List, List, List]] = None,
         num_workers: int = 0,
         sampler: Optional[Sampler] = None,
-        target_normalizer: Optional[str] = None,
         max_samples_per_group: Optional[int] = None,
         precompute: bool = True,
         include_target_in_decoder: bool = False,
@@ -274,16 +353,22 @@ class EncoderDecoder(pl.LightningDataModule):
             batch_size: Batch size for dataloaders
             step_size: Step size for sliding window
             min_valid_length: Minimum required length for a valid window
-            split_method: Method for splitting data ('percentage' or 'group')
-            split_config: Tuple (train_ratio, val_ratio, test_ratio) for data splitting
+            split_ratio: Tuple of (train_ratio, val_ratio, test_ratio) for splitting data.
+                Default: (0.7, 0.15, 0.15)
+                - For local forecasting: Applied directly to all windows
+                - For global forecasting: Applied based on split_group_config strategy
+            split_group_config: Tuple of 3 lists (train_groups, val_groups, test_groups).
+                Default: None (pure temporal split, local forecasting)
+                - If None: Pure temporal split on all windows
+                - If (train, [], []): Temporal split of train groups only
+                - If (train, val, test): Hybrid split (ratio on train, 100% for val/test)
             num_workers: Number of workers for dataloaders
             sampler: Optional sampler for training dataloader
-            target_normalizer: Optional normalizer for targets
             max_samples_per_group: Maximum samples per group
             precompute: if True, build valid windows in __init__ (default: True)
             include_target_in_decoder: if True include target in decoder part
-            scaling_method: Scaling method ("standard" or "minmax" or None)
-            scale_targets: if True, also scale target variables (default: False)
+            scaling_method: Scaler for features. Options: 'standard', 'minmax', or None
+            scale_targets: If True, scale target variables using same scaler as features
         """
         super().__init__()
 
@@ -293,17 +378,24 @@ class EncoderDecoder(pl.LightningDataModule):
         self.batch_size = batch_size
         self.step_size = step_size
         self.min_valid_length = min_valid_length or past_len
-        self.split_method = split_method
-        self.split_config = split_config
+        self.split_ratio = split_ratio
+        self.split_group_config = split_group_config
         self.num_workers = num_workers
         self.sampler = sampler
-        self.target_normalizer = target_normalizer
         self.max_samples_per_group = max_samples_per_group
         self.precompute = precompute
-        self.scale_targets = scale_targets
         self.scaling_method = scaling_method
+        self.scale_targets = scale_targets
 
-        # Initialize scikit-learn scalers directly
+        # Determine if global forecasting is enabled from D1 dataset
+        self.global_forecasting = getattr(self.d1_dataset, "global_forecasting", False)
+        logger.info(f"Global forecasting mode: {self.global_forecasting}")
+
+        # State flags for setup() method
+        self.splits_created = False  # Track if splits have been created
+        self.is_scaler_fitted = False  # Track if scaler has been fitted
+
+        # Initialize scikit-learn scalers (not fitted yet)
         if scaling_method == "standard":
             self.feature_scaler = StandardScaler()
             self.target_scaler = StandardScaler() if scale_targets else None
@@ -358,25 +450,23 @@ class EncoderDecoder(pl.LightningDataModule):
             cat_cols=getattr(self.d1_dataset, "cat_cols", None),
             cont_feature_cols=getattr(self.d1_dataset, "num_cols", None),
             include_target_in_decoder=include_target_in_decoder,
+            use_cache=self.memory_efficient,
+            cache_size=32000,
         )
 
-        # Initialize dataset splits as None
+        # Placeholders for split datasets
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
 
-        # Auto-setup if split_config provided
-        if split_config is not None:
-            if len(split_config) != 3:
-                raise ValueError(f"split_config must be tuple of 3 values (train, val, test), got {len(split_config)}")
-            train_ratio, val_ratio, test_ratio = split_config
-            logger.info(f"Auto-running setup() with split_config: {split_config}")
-            self.setup(train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio)
+        # Store split indices
+        self.train_indices = None
+        self.val_indices = None
+        self.test_indices = None
 
     def _fit_scaler_direct_d1(self, train_indices):
         """
         Optimized scaler fitting for memory_efficient=False.
-        Directly accesses cached D1 data without going through D2 __getitem__.
 
         Args:
             train_indices: List of D2 window indices for training
@@ -385,9 +475,7 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.info("No scaling method specified, skipping scaler fitting")
             return
 
-        import numpy as np
-
-        logger.info(f"Fitting {self.scaling_method} scaler directly on cached D1 data...")
+        logger.info(f"Fitting {self.scaling_method} scaler on training windows...")
 
         # Get metadata
         meta = getattr(self.d1_dataset, "metadata", {})
@@ -396,27 +484,29 @@ class EncoderDecoder(pl.LightningDataModule):
         n_features_total = len(feature_cols)
         idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
 
-        # Identify unique D1 group indices needed for training windows
-        group_indices_needed = sorted(list(set(self.valid_windows[idx]["group_idx"] for idx in train_indices)))
+        logger.info(f"  Fitting on {len(train_indices)} training windows")
 
-        logger.info(f"  Accessing {len(group_indices_needed)} unique D1 groups for {len(train_indices)} training windows")
-
-        # Extract RAW numerical data directly from D1 cache
+        # Extract data ONLY from training windows
         all_features_list = []
         all_targets_list = []
 
-        for group_idx in group_indices_needed:
-            # Get D1 data (will use cache if available, otherwise load)
+        for window_idx in train_indices:
+            window = self.valid_windows[window_idx]
+            group_idx = window["group_idx"]
+            start_idx = window["start_idx"]
+            past_len = window["past_len"]
+            end_idx = start_idx + past_len
             group_data = self.d1_dataset[group_idx]
 
-            # Extract numeric columns from 'x' tensor
             if idx_num and "x" in group_data:
-                numeric_data = group_data["x"][:, idx_num].numpy()
-                all_features_list.append(numeric_data)
+                window_numeric = group_data["x"][start_idx:end_idx, idx_num].numpy()
+                if window_numeric.size > 0:
+                    all_features_list.append(window_numeric)
 
-            # Extract targets if scaling targets
             if self.scale_targets and "y" in group_data:
-                all_targets_list.append(group_data["y"].numpy())
+                window_targets = group_data["y"][start_idx:end_idx].numpy()
+                if window_targets.size > 0:
+                    all_targets_list.append(window_targets)
 
         # Fit feature scaler on concatenated raw data
         if all_features_list:
@@ -427,7 +517,7 @@ class EncoderDecoder(pl.LightningDataModule):
             )
 
         # Fit target scaler
-        if self.scale_targets and self.target_scaler and all_targets_list:
+        if self.target_scaler and all_targets_list:
             targets_array = np.concatenate(all_targets_list, axis=0)
             self.target_scaler.fit(targets_array)
             logger.info(
@@ -438,7 +528,7 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def _fit_scaler_batched(self, train_indices):
         """
-        Optimized scaler fitting using partial_fit with direct D1 cache access (for memory_efficient=True).
+        Optimized scaler fitting using partial_fit on training windows only (for memory_efficient=True).
         Args:
             train_indices: List of D2 window indices for training
         """
@@ -446,7 +536,7 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.info("No scaling method specified, skipping scaler fitting")
             return
 
-        logger.info(f"Fitting {self.scaling_method} scaler using partial_fit with direct D1 access (memory-efficient mode)...")
+        logger.info(f"Fitting {self.scaling_method} scaler using partial_fit on training windows only...")
 
         # Get metadata
         meta = getattr(self.d1_dataset, "metadata", {})
@@ -455,37 +545,51 @@ class EncoderDecoder(pl.LightningDataModule):
         n_features_total = len(feature_cols)
         idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
 
-        # Identify unique D1 group indices needed for training windows
-        group_indices_needed = sorted(list(set(self.valid_windows[idx]["group_idx"] for idx in train_indices)))
+        logger.info(f"  Fitting on {len(train_indices)} training windows using partial_fit")
 
-        logger.info(f"  Processing {len(group_indices_needed)} unique D1 groups for {len(train_indices)} training windows")
-        logger.info("  Using partial_fit to minimize memory footprint")
+        batch_size = 100
+        total_timesteps = 0
 
-        # Process each D1 group separately (memory-efficient)
-        for group_num, group_idx in enumerate(group_indices_needed):
-            if group_num % max(1, len(group_indices_needed) // 10) == 0:
+        for batch_start in range(0, len(train_indices), batch_size):
+            batch_end = min(batch_start + batch_size, len(train_indices))
+            batch_indices = train_indices[batch_start:batch_end]
+
+            if batch_start % (batch_size * 10) == 0:
                 logger.info(
-                    f"  Processing group {group_num + 1}/{len(group_indices_needed)} ({100 * (group_num + 1) / len(group_indices_needed):.1f}%)"  # noqa
+                    f"  Processing windows {batch_start}/{len(train_indices)} ({100 * batch_start / len(train_indices):.1f}%)"
                 )
 
-            # Get D1 data (will use cache if available, otherwise load)
-            group_data = self.d1_dataset[group_idx]
+            # Collect data from this batch of windows
+            batch_features = []
+            batch_targets = []
 
-            # Extract numeric columns
-            if idx_num and "x" in group_data:
-                numeric_data = group_data["x"][:, idx_num].numpy()
+            for window_idx in batch_indices:
+                window = self.valid_windows[window_idx]
+                group_idx = window["group_idx"]
+                start_idx = window["start_idx"]
+                past_len = window["past_len"]
+                end_idx = start_idx + past_len
+                group_data = self.d1_dataset[group_idx]
+                if idx_num and "x" in group_data:
+                    window_numeric = group_data["x"][start_idx:end_idx, idx_num].numpy()
+                    if window_numeric.size > 0:
+                        batch_features.append(window_numeric)
 
-                # Partial fit on this group's data
-                if numeric_data.size > 0:
-                    self.feature_scaler.partial_fit(numeric_data)
+                if self.scale_targets and "y" in group_data:
+                    window_targets = group_data["y"][start_idx:end_idx].numpy()
+                    if window_targets.size > 0:
+                        batch_targets.append(window_targets)
 
-            # Extract targets if scaling targets
-            if self.scale_targets and self.target_scaler is not None and "y" in group_data:
-                target_data = group_data["y"].numpy()
-                if target_data.size > 0:
-                    self.target_scaler.partial_fit(target_data)
+            if batch_features:
+                batch_features_array = np.concatenate(batch_features, axis=0)
+                self.feature_scaler.partial_fit(batch_features_array)
+                total_timesteps += batch_features_array.shape[0]
 
-        logger.info(f"Scaler fitted successfully on {len(group_indices_needed)} groups using partial_fit")
+            if self.target_scaler and batch_targets:
+                batch_targets_array = np.concatenate(batch_targets, axis=0)
+                self.target_scaler.partial_fit(batch_targets_array)
+
+        logger.info(f"  Feature scaler fitted on {total_timesteps} total timesteps from {len(train_indices)} training windows")
         self.is_scaler_fitted = True
 
     def fit_scaler(self, train_indices):
@@ -499,21 +603,14 @@ class EncoderDecoder(pl.LightningDataModule):
         if self.feature_scaler is None:
             logger.info("No scaling method specified, skipping scaler fitting")
             return
-
-        # Both modes now use direct D1 access!
         if not self.memory_efficient:
-            # Direct D1 access with single fit() call
             self._fit_scaler_direct_d1(train_indices)
         else:
-            # Direct D1 access with partial_fit() for memory efficiency
             self._fit_scaler_batched(train_indices)
-
-        # Attach fitted scalers to dataset
         if self.is_scaler_fitted:
             logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
             self.dataset.feature_scaler = self.feature_scaler
             self.dataset.target_scaler = self.target_scaler
-            self.dataset.scale_targets = self.scale_targets
 
     def apply_inverse_scaling(self, data, data_type="features"):
         """
@@ -531,7 +628,7 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.warning("Scaler not fitted, returning original data")
             return data
 
-        # Select appropriate scaler
+        # seleting appropriate scaler
         if data_type == "targets" and self.target_scaler:
             scaler = self.target_scaler
         elif data_type == "features" and self.feature_scaler:
@@ -540,7 +637,7 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.warning(f"No scaler available for data_type='{data_type}', returning original data")
             return data
 
-        # Convert to numpy if needed
+        # convert to numpy if needed
         is_tensor = isinstance(data, torch.Tensor)
         if is_tensor:
             data_np = data.detach().cpu().numpy()
@@ -554,7 +651,6 @@ class EncoderDecoder(pl.LightningDataModule):
             batch_size, time_steps, n_features = data_np.shape
             data_np = data_np.reshape(-1, n_features)
 
-        # Apply inverse transform
         data_inverse = scaler.inverse_transform(data_np)
 
         # Reshape back to original shape if needed
@@ -579,57 +675,6 @@ class EncoderDecoder(pl.LightningDataModule):
         from .utils import is_valid_window
 
         return is_valid_window(past_indices, future_indices, self.past_len, self.future_len)
-
-    def _create_splits(self, split_config):
-        """
-        Create train/validation/test splits based on the specified configuration.
-
-        Args:
-            split_config: Configuration for splits:
-                        - For 'percentage' method: (train%, val%, test%)
-                        - For 'group' method: (train_groups, val_groups, test_groups)
-
-        Returns:
-            Tuple of (train_indices, val_indices, test_indices)
-        """
-        if self.split_method == "percentage":
-            # Percentage-based split
-            train_pct, val_pct, test_pct = split_config
-            total_samples = len(self.valid_windows)
-
-            # Calculate indices for each split
-            train_end = int(total_samples * train_pct)
-            val_end = int(total_samples * (train_pct + val_pct))
-
-            train_indices = list(range(0, train_end))
-            val_indices = list(range(train_end, val_end))
-            test_indices = list(range(val_end, total_samples))
-
-            return train_indices, val_indices, test_indices
-
-        elif self.split_method == "group":
-            # Group-based split
-            train_groups, val_groups, test_groups = split_config
-
-            # Map group names to indices
-            train_indices = []
-            val_indices = []
-            test_indices = []
-
-            for idx, window in enumerate(self.valid_windows):
-                group_id = window["group_id"]
-
-                if group_id in train_groups:
-                    train_indices.append(idx)
-                elif group_id in val_groups:
-                    val_indices.append(idx)
-                elif group_id in test_groups:
-                    test_indices.append(idx)
-
-            return train_indices, val_indices, test_indices
-
-        else:
-            raise ValueError(f"Unknown split method: {self.split_method}")
 
     def _pretransform_splits(self, train_dataset, val_dataset, test_dataset):
         """
@@ -657,15 +702,8 @@ class EncoderDecoder(pl.LightningDataModule):
     def _pretransform_dataset_direct(self, indices):
         """
         Pre-transform dataset by directly accessing D1 data
-
-        Args:
-            indices: List of window indices to extract
-        Returns:
-            PreTransformedDataset wrapper with cached transformed data
         """
-        import numpy as np
-
-        logger.info(f"Pre-transforming {len(indices)} samples (direct D1 access, no __getitem__)...")
+        logger.info(f"Pre-transforming {len(indices)} samples")
 
         # Get D1 metadata
         meta = getattr(self.d1_dataset, "metadata", {}) or {}
@@ -678,50 +716,79 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Ensure temporal features are categorical
         if enrich_cat and feature_cols:
+            # one-time build of fast lookup structures
+            feature_to_idx = {name: i for i, name in enumerate(feature_cols)}
+            cat_set = set(idx_categorical)  # existing indices
+
+            for temporal_feature in enrich_cat:
+                feature_idx = feature_to_idx.get(temporal_feature)
+                if feature_idx is not None and feature_idx not in cat_set:
+                    idx_categorical.append(feature_idx)
+                    cat_set.add(feature_idx)  # keep set in sync
+        """ # TODO: REMOVE COMMENTED CODE If the above optimized code works fine [O(1) complexity]
+        if enrich_cat and feature_cols:
             for temporal_feature in enrich_cat:
                 if temporal_feature in feature_cols:
                     feature_idx = feature_cols.index(temporal_feature)
                     if feature_idx not in idx_categorical:
                         idx_categorical.append(feature_idx)
-
+        """
         # Determine numeric indices
         n_features = int(meta.get("n_features", 0))
         all_idx = list(range(n_features))
         idx_num = [i for i in all_idx if i not in idx_categorical]
 
-        # ULTRA-FAST EXTRACTION: Use index range instead of individual windows
-        logger.info("  Extracting data using index range (ultra-fast)...")
+        # ULTRA-FAST EXTRACTION: Group windows by group_idx for efficient extraction
+        logger.info("  Extracting data by group (optimized)...")
 
-        # Get D1 data once
-        group_sample = self.d1_dataset[0]
-        X_full = group_sample["x"].numpy()
-        y_full = group_sample["y"].numpy()
+        # Group windows by their group_idx
+        from collections import defaultdict
 
-        # Find the data range we need (minimum start to maximum end across all windows)
-        # This handles both contiguous and non-contiguous window indices
-        all_starts = [self.valid_windows[idx]["start_idx"] for idx in indices]
-        all_ends = [self.valid_windows[idx]["start_idx"] + self.past_len + self.future_len for idx in indices]
+        windows_by_group = defaultdict(list)
+        for idx in indices:
+            group_idx = self.valid_windows[idx]["group_idx"]
+            windows_by_group[group_idx].append(idx)
 
-        first_start = min(all_starts)
-        last_end = min(max(all_ends), len(X_full))
+        logger.info(f"  Processing {len(windows_by_group)} unique groups for {len(indices)} windows")
 
-        # Extract the entire data range at once (single slice!)
-        X_range = X_full[first_start:last_end]
-        y_range = y_full[first_start:last_end]
+        # Extract data for each group separately
+        all_x_past_list = []
+        all_x_future_list = []
+        all_y_future_list = []
+        all_window_info = []
 
-        logger.info(f"  Extracted data range [{first_start}:{last_end}] = {last_end - first_start} timesteps")
+        for group_idx, group_window_indices in windows_by_group.items():
+            # Get D1 data for this group
+            group_data = self.d1_dataset[group_idx]
+            X_group = group_data["x"].numpy()
+            y_group = group_data["y"].numpy()
 
-        # Now extract windows from this range using relative indices
-        window_starts = np.array([self.valid_windows[idx]["start_idx"] - first_start for idx in indices])
+            # Extract windows for this group
+            for window_idx in group_window_indices:
+                start_idx = self.valid_windows[window_idx]["start_idx"]
+                end_idx = start_idx + self.past_len + self.future_len
 
-        # Create index arrays for ALL windows
-        past_indices = window_starts[:, None] + np.arange(self.past_len)[None, :]
-        future_indices = (window_starts[:, None] + self.past_len) + np.arange(self.future_len)[None, :]
+                # Check bounds
+                if end_idx > len(X_group):
+                    logger.warning(f"  Skipping window {window_idx}: end_idx {end_idx} > group length {len(X_group)}")
+                    continue
 
-        # Extract ALL windows at once using advanced indexing
-        X_past_all = X_range[past_indices]
-        X_future_all = X_range[future_indices]
-        y_future_all = y_range[future_indices]
+                # Extract past and future windows
+                x_past = X_group[start_idx : start_idx + self.past_len]
+                x_future = X_group[start_idx + self.past_len : end_idx]
+                y_future = y_group[start_idx + self.past_len : end_idx]
+
+                all_x_past_list.append(x_past)
+                all_x_future_list.append(x_future)
+                all_y_future_list.append(y_future)
+                all_window_info.append(self.valid_windows[window_idx])
+
+        # Stack all windows
+        X_past_all = np.stack(all_x_past_list, axis=0)
+        X_future_all = np.stack(all_x_future_list, axis=0)
+        y_future_all = np.stack(all_y_future_list, axis=0)
+
+        logger.info(f"  Extracted {len(all_x_past_list)} windows successfully")
 
         # Extract numeric features for ALL windows at once
         if len(idx_num) > 0:
@@ -740,8 +807,6 @@ class EncoderDecoder(pl.LightningDataModule):
         all_y = y_future_all
         all_X_past = X_past_all
         all_X_future = X_future_all
-
-        logger.info(f"  Extracted {len(indices)} windows in single vectorized operation")
 
         # Transform ALL numeric features in one shot (already vectorized!)
         logger.info("  Applying scaling transformation (single call, fully vectorized)...")
@@ -768,7 +833,7 @@ class EncoderDecoder(pl.LightningDataModule):
                 all_x_num_future = transformed.reshape(original_shape)
 
         # Transform targets if enabled
-        if self.scale_targets and self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
+        if self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
             logger.info("  Applying target scaling (single call, fully vectorized)...")
             original_shape = all_y.shape
             reshaped = all_y.reshape(-1, original_shape[-1])
@@ -806,8 +871,8 @@ class EncoderDecoder(pl.LightningDataModule):
             all_X_past,
             all_X_future,
             all_y,
-            indices,
-            self.valid_windows,
+            list(range(len(all_window_info))),  # Use sequential indices
+            all_window_info,  # Use extracted window info
             idx_categorical,
             future_cat_indices,
             idx_target_tensor,
@@ -825,159 +890,251 @@ class EncoderDecoder(pl.LightningDataModule):
 
         return self._pretransform_dataset_direct(indices)
 
-    def _create_group_temporal_splits(self, train_ratio, val_ratio, test_ratio):
+    def _create_splits(self):
         """
-        Create temporal splits within each group.
-        Args:
-            train_ratio: Ratio for training data
-            val_ratio: Ratio for validation data
-            test_ratio: Ratio for test data
+        Unified method to create train/val/test splits with flexible group-based logic.
 
         Returns:
             Tuple of (train_indices, val_indices, test_indices)
         """
-        train_windows = []
-        val_windows = []
-        test_windows = []
-
         from collections import defaultdict
 
-        windows_by_group = defaultdict(list)
-        for idx, window in enumerate(self.valid_windows):
-            group_id = window["group_id"]
-            windows_by_group[group_id].append(idx)
+        from .utils import create_temporal_splits
 
-        logger.info(f"Creating group-based temporal splits for {len(windows_by_group)} groups")
-
-        # Split each group temporally
-        for group_id, window_indices in windows_by_group.items():
-            n_windows = len(window_indices)
-
-            train_end = int(n_windows * train_ratio)
-            val_end = int(n_windows * (train_ratio + val_ratio))
-
-            train_windows.extend(window_indices[:train_end])
-            val_windows.extend(window_indices[train_end:val_end])
-            test_windows.extend(window_indices[val_end:])
-
-        logger.debug(f"Group splits: {len(train_windows)} train, \
-            {len(val_windows)} val, {len(test_windows)} test windows")
-
-        return train_windows, val_windows, test_windows
-
-    def setup(
-        self,
-        train_ratio: float = 0.7,
-        val_ratio: float = 0.15,
-        test_ratio: float = 0.15,
-        scaling_method: str = None,
-    ):
-        """
-        Set up train/val/test splits and fit scaler.
-
-        This method performs:
-        1. Splitting data into train/val/test
-        2. Fitting scaler on training data
-        3. Transformation strategy based on memory_efficient:
-           - memory_efficient= False: pre-transforms all data upfront (faster inference)
-           - memory_efficient=True: transforms on-the-fly in __getitem__ (lower memory)
-
-        Args:
-            train_ratio: Ratio of data for training (default: 0.7)
-            val_ratio: Ratio of data for validation (default: 0.15)
-            test_ratio: Ratio of data for testing (default: 0.15)
-            scaling_method: Optional scaling method to apply. If provided, overrides the
-                          scaling_method set during __init__. Use this to defer scaling
-                          until setup() is called. Options: 'standard', 'minmax', None
-        """
-        # Allow re-setup if scaling_method is provided (deferred scaling)
-        if self.train_dataset is not None and scaling_method is None:
-            logger.info("Datasets already set up, skipping setup()")
-            return
-
-        # Update scaling_method if provided
-        if scaling_method is not None:
-            if self.scaling_method is not None and self.scaling_method != scaling_method:
-                logger.warning(f"Overriding scaling_method from '{self.scaling_method}' to '{scaling_method}'")
-            self.scaling_method = scaling_method
-            # Re-initialize scaler with new method
-            if scaling_method == "standard":
-                from sklearn.preprocessing import StandardScaler
-
-                self.feature_scaler = StandardScaler()
-                if self.scale_targets:
-                    self.target_scaler = StandardScaler()
-            elif scaling_method == "minmax":
-                from sklearn.preprocessing import MinMaxScaler
-
-                self.feature_scaler = MinMaxScaler()
-                if self.scale_targets:
-                    self.target_scaler = MinMaxScaler()
-            else:
-                self.feature_scaler = None
-                self.target_scaler = None
-            logger.info(f"Scaling method set to: {scaling_method}")
+        train_ratio, val_ratio, test_ratio = self.split_ratio
 
         # Verify ratios sum to 1
         ratio_sum = train_ratio + val_ratio + test_ratio
         if abs(ratio_sum - 1.0) > 1e-6:
             logger.warning(f"Split ratios sum to {ratio_sum:.3f}, not 1.0")
 
-        # Step 1: Create splits based on split_method
-        logger.info(
-            f"Creating splits with method='{self.split_method}' (train={train_ratio}, val={val_ratio}, test={test_ratio})"
-        )
-
-        if self.split_method == "percentage":
-            # Global percentage split
-            from .utils import create_temporal_splits
-
+        # If global_forecasting=False (local forecasting), ALWAYS use temporal split
+        if not self.global_forecasting:
+            logger.info("[D2 split] global_forecasting=False (Local forecasting). Ignoring split_group_config.")
+            logger.info("[D2 split] Applying pure temporal split to all windows.")
             train_indices, val_indices, test_indices = create_temporal_splits(
                 self.valid_windows, train_ratio, val_ratio, test_ratio
             )
-        elif self.split_method == "group":
-            # Group-based temporal split
-            train_indices, val_indices, test_indices = self._create_group_temporal_splits(train_ratio, val_ratio, test_ratio)
+            logger.info(
+                f"[D2 split] Temporal split complete: Train={len(train_indices)}, "
+                f"Val={len(val_indices)}, Test={len(test_indices)}"
+            )
+            return train_indices, val_indices, test_indices
+
+        # === Case 1: NO split_group_config provided ===
+        # This is a pure TEMPORAL (Local) split
+        if self.split_group_config is None:
+            logger.info("No split_group_config provided. Applying temporal split to all groups.")
+            train_indices, val_indices, test_indices = create_temporal_splits(
+                self.valid_windows, train_ratio, val_ratio, test_ratio
+            )
+            logger.info(
+                f"[D2 split] Temporal split complete: Train={len(train_indices)}, "
+                f"Val={len(val_indices)}, Test={len(test_indices)}"
+            )
+            return train_indices, val_indices, test_indices
+
+        # === Case 2: split_group_config ARE provided ===
+        # This is a GLOBAL split
+
+        train_groups = self.split_group_config[0]
+        val_groups = self.split_group_config[1]
+        test_groups = self.split_group_config[2]
+
+        if not train_groups:
+            raise ValueError("Global forecasting requires a non-empty 'train' list in split_group_config.")
+
+        # CRITICAL: Validate that groups are mutually exclusive
+        train_set = set(train_groups)
+        val_set = set(val_groups)
+        test_set = set(test_groups)
+
+        # Check for overlaps: to prevent data leakage between train/val/test
+        train_val_overlap = train_set & val_set
+        train_test_overlap = train_set & test_set
+        val_test_overlap = val_set & test_set
+
+        if train_val_overlap:
+            raise ValueError(
+                f"DATA LEAKAGE DETECTED: Groups {train_val_overlap} appear in BOTH train_groups and val_groups. "
+                f"This causes validation data to leak into training data. "
+                f"Groups must be mutually exclusive across train/val/test splits."
+            )
+        if train_test_overlap:
+            raise ValueError(
+                f"DATA LEAKAGE DETECTED: Groups {train_test_overlap} appear in BOTH train_groups and test_groups. "
+                f"This causes test data to leak into training data. "
+                f"Groups must be mutually exclusive across train/val/test splits."
+            )
+        if val_test_overlap:
+            raise ValueError(
+                f"DATA LEAKAGE DETECTED: Groups {val_test_overlap} appear in BOTH val_groups and test_groups. "
+                f"This causes test data to leak into validation data. "
+                f"Groups must be mutually exclusive across train/val/test splits."
+            )
+
+        logger.info("[D2 split] Group validation passed: No overlapping groups detected.")
+
+        # Collate all windows by their group
+        windows_by_group = defaultdict(list)
+        for idx, window in enumerate(self.valid_windows):
+            windows_by_group[window["group_id"]].append(idx)
+
+        # --- Initialize final index lists ---
+        train_indices = []
+        val_indices = []
+        test_indices = []
+
+        # --- Strategy A: "Strict Group Separation" ---
+        # If user provides val or test groups, we assume they want strict separation.
+        # The split_ratio will *only* be used on the train_groups.
+        if val_groups or test_groups:
+            logger.info("Hybrid group/temporal split: val/test groups provided.")
+
+            # 1. Add 100% of val_groups to val_indices
+            for group_id in val_groups:
+                val_indices.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Val group '{group_id}': {len(windows_by_group[group_id])} windows -> 100% to val")
+
+            # 2. Add 100% of test_groups to test_indices
+            for group_id in test_groups:
+                test_indices.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Test group '{group_id}': {len(windows_by_group[group_id])} windows -> 100% to test")
+
+            # 3. Split the train_groups using the ratio
+            train_group_windows = []
+            for group_id in train_groups:
+                train_group_windows.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Train group '{group_id}': {len(windows_by_group[group_id])} windows")
+
+            # Apply ratio to train_group_windows
+            n_train_group = len(train_group_windows)
+            train_end = int(n_train_group * train_ratio)
+            val_end = int(n_train_group * (train_ratio + val_ratio))
+
+            # Add the split data to the final lists
+            train_indices.extend(train_group_windows[:train_end])
+            val_indices.extend(train_group_windows[train_end:val_end])
+            test_indices.extend(train_group_windows[val_end:])
+
+            logger.info("Hybrid group/temporal split complete.")
+
+        # --- Strategy B: "Temporal Split of Train Groups" ---
+        # if user ONLY provides train_groups: they want to create all three sets from that list.
         else:
-            raise ValueError(f"Unknown split_method: {self.split_method}. Use 'percentage' or 'group'.")
+            logger.info("Only train_groups provided. Splitting them temporally by split_ratio.")
+            train_group_windows = []
+            for group_id in train_groups:
+                train_group_windows.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Train group '{group_id}': {len(windows_by_group[group_id])} windows")
 
-        logger.info(f"Split complete: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+            # Apply ratio to create all three sets
+            n_train_group = len(train_group_windows)
+            train_end = int(n_train_group * train_ratio)
+            val_end = int(n_train_group * (train_ratio + val_ratio))
 
-        # Step 2: Create subset datasets
-        train_dataset = EncoderDecoderSubset(self.dataset, train_indices)
-        val_dataset = EncoderDecoderSubset(self.dataset, val_indices)
-        test_dataset = EncoderDecoderSubset(self.dataset, test_indices)
+            train_indices = train_group_windows[:train_end]
+            val_indices = train_group_windows[train_end:val_end]
+            test_indices = train_group_windows[val_end:]
+            logger.info("Pure temporal split of train_groups complete.")
 
-        # Step 3: Fit scaler and apply transformation strategy
-        if self.scaling_method is not None:
-            logger.info(f"Fitting {self.scaling_method} scaler on training data...")
+        logger.info(f"Final split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+        return train_indices, val_indices, test_indices
 
-            # Both modes now use direct D1 access with train_indices!
-            self.fit_scaler(train_indices)
+    def setup(self, stage: str):
+        """
+        Called once per stage ('fit', 'test', 'predict') per process.
 
-            self.is_scaler_fitted = True
-            logger.info(f"✅ Scaler fitted successfully (is_scaler_fitted={self.is_scaler_fitted})")
+        This method:
+        1. Creates train/val/test splits (guarded by splits_created flag)
+        2. Fits scaler on training data (guarded by is_scaler_fitted flag)
+        3. Transforms data based on memory_efficient mode
+        4. Creates stage-specific datasets
 
-            # Step 4: Apply transformation based on memory_efficient flag
-            if not self.memory_efficient:
-                # Pre-transform all data for faster inference
-                logger.info("Pre-transforming all splits (memory_efficient=False)...")
-                train_dataset, val_dataset, test_dataset = self._pretransform_splits(train_dataset, val_dataset, test_dataset)
-            else:
-                # Attach scalers to dataset for on-the-fly transformation
-                logger.info("Attaching scalers for on-the-fly transformation (memory_efficient=True)")
-                self.dataset.feature_scaler = self.feature_scaler
-                self.dataset.target_scaler = self.target_scaler
-                self.dataset.scale_targets = self.scale_targets
+        Args:
+            stage: Stage of training ('fit', 'test', 'predict', or PyTorch Lightning TrainerFn enum)
+        """
+        logger.info(f"[D2 setup] Called with stage='{stage}'")
+
+        # Convert TrainerFn enum to string if needed
+        stage_str = str(stage).split(".")[-1].lower() if hasattr(stage, "name") else str(stage).lower()
+
+        # 🎯 STAGE 1: Create splits (ONCE, guarded by flag)
+        if not self.splits_created:
+            logger.info("[D2 setup] Splits not created. Creating train/val/test splits...")
+
+            # Use unified split method
+            self.train_indices, self.val_indices, self.test_indices = self._create_splits()
+
+            logger.info(
+                f"[D2 setup] Splits created: Train={len(self.train_indices)}, "
+                f"Val={len(self.val_indices)}, Test={len(self.test_indices)}"
+            )
+            self.splits_created = True
         else:
-            logger.info("No scaling method specified, skipping scaler fitting")
+            logger.info("[D2 setup] Splits already created. Skipping split step.")
 
-        # Step 5: Store datasets
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.test_dataset = test_dataset
+        # 🎯 STAGE 2: Fit scaler (ONCE, guarded by flag)
+        if self.scaling_method is not None and not self.is_scaler_fitted:
+            logger.info(f"[D2 setup] Scaler not fitted. Fitting {self.scaling_method} scaler on training data...")
 
-        logger.info("Setup complete!")
+            # Fit scaler on training data only
+            self.fit_scaler(self.train_indices)
+
+            logger.info(f"[D2 setup] ✅ Scaler fitted (is_scaler_fitted={self.is_scaler_fitted})")
+
+        elif self.scaling_method is not None and self.is_scaler_fitted:
+            logger.info("[D2 setup] Scaler already fitted. Skipping fit step.")
+        else:
+            logger.info("[D2 setup] No scaling_method specified. Skipping scaler fitting.")
+
+        # 🎯 STAGE 3: Create stage-specific datasets
+        if "fit" in stage_str:
+            logger.info("[D2 setup] Setting up 'fit' stage (train + val datasets)...")
+
+            # Create subset datasets
+            train_dataset = EncoderDecoderSubset(self.dataset, self.train_indices)
+            val_dataset = EncoderDecoderSubset(self.dataset, self.val_indices) if self.val_indices else None
+
+            # Apply transformation strategy
+            if self.scaling_method is not None:
+                if not self.memory_efficient:
+                    logger.info("[D2 setup] Pre-transforming train/val data (memory_efficient=False)...")
+                    train_dataset = self._pretransform_dataset_direct(self.train_indices)
+                    val_dataset = self._pretransform_dataset_direct(self.val_indices) if self.val_indices else None
+                else:
+                    logger.info("[D2 setup] Attaching scalers for on-the-fly transformation (memory_efficient=True)")
+                    self.dataset.feature_scaler = self.feature_scaler
+                    self.dataset.target_scaler = self.target_scaler
+
+            self.train_dataset = train_dataset
+            self.val_dataset = val_dataset
+            logger.info("[D2 setup] 'fit' datasets created.")
+
+        if "test" in stage_str:
+            logger.info("[D2 setup] Setting up 'test' stage...")
+
+            test_dataset = EncoderDecoderSubset(self.dataset, self.test_indices) if self.test_indices else None
+
+            if self.scaling_method is not None and test_dataset:
+                if not self.memory_efficient:
+                    logger.info("[D2 setup] Pre-transforming test data (memory_efficient=False)...")
+                    test_dataset = self._pretransform_dataset_direct(self.test_indices)
+                else:
+                    logger.info("[D2 setup] Using on-the-fly transformation for test (memory_efficient=True)")
+                    # Scalers already attached in 'fit' stage
+
+            self.test_dataset = test_dataset
+            logger.info("[D2 setup] 'test' dataset created.")
+
+        if "predict" in stage_str:
+            logger.info("[D2 setup] Setting up 'predict' stage...")
+            # For predict, typically use test dataset
+            if self.test_dataset is None:
+                self.test_dataset = EncoderDecoderSubset(self.dataset, self.test_indices) if self.test_indices else None
+            logger.info("[D2 setup] 'predict' dataset ready.")
+
+        logger.info(f"[D2 setup] Setup complete for stage='{stage}'!")
 
     def train_dataloader(self):
         """Return the training dataloader."""

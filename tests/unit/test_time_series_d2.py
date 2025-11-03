@@ -80,14 +80,16 @@ class TestD2Batch:
 
 class TestD2Scaling:
     def test_standard(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="standard", split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
         assert d2.is_scaler_fitted
         x, y = d2.train_dataset[0]
         assert abs(x["x_num_past"].mean().item()) < 2
         logger.info("✓ Standard scaling")
 
     def test_minmax(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="minmax", split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, scaling_method="minmax", split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
         x, y = d2.train_dataset[0]
         assert x["x_num_past"].min() >= -0.1 and x["x_num_past"].max() <= 1.1
         logger.info("✓ MinMax scaling")
@@ -95,19 +97,23 @@ class TestD2Scaling:
 
 class TestD2Splitting:
     def test_temporal(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_method="percentage", split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
+        d2.setup(stage="test")
         assert len(d2.train_dataset) > 0 and len(d2.val_dataset) > 0 and len(d2.test_dataset) > 0
         logger.info(f"✓ Temporal: train={len(d2.train_dataset)}, val={len(d2.val_dataset)}, test={len(d2.test_dataset)}")
 
     def test_random(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_method="percentage", split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
         assert len(d2.train_dataset) > 0
         logger.info("✓ Random split")
 
 
 class TestD2DataLoader:
     def test_loader(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, batch_size=16, split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, batch_size=16, split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
         loader = DataLoader(d2.train_dataset, batch_size=16, shuffle=True)
         batch = next(iter(loader))
         x, y = batch
@@ -152,8 +158,9 @@ class TestD2TargetScaling:
 
     def test_target_scaling_enabled(self, d1_basic):
         d2 = EncoderDecoder(
-            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=True, split_config=(0.7, 0.15, 0.15)
+            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=True, split_ratio=(0.7, 0.15, 0.15)
         )
+        d2.setup(stage="fit")
 
         # Check that target scaler exists
         assert d2.target_scaler is not None
@@ -165,8 +172,9 @@ class TestD2TargetScaling:
 
     def test_target_scaling_disabled(self, d1_basic):
         d2 = EncoderDecoder(
-            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=False, split_config=(0.7, 0.15, 0.15)
+            d1_basic, past_len=24, future_len=12, scaling_method="standard", scale_targets=False, split_ratio=(0.7, 0.15, 0.15)
         )
+        d2.setup(stage="fit")
 
         # Target scaler should still exist but not applied
         x, y = d2.train_dataset[0]
@@ -209,8 +217,9 @@ class TestD2TargetScaling:
             future_len=12,
             scaling_method="standard",
             scale_targets=True,
-            split_config=(0.7, 0.15, 0.15),
+            split_ratio=(0.7, 0.15, 0.15),
         )
+        d2.setup(stage="fit")
 
         # Collect features from multiple samples
         all_features = []
@@ -276,8 +285,9 @@ class TestD2TargetScaling:
         )
 
         d2 = EncoderDecoder(
-            d1_dataset=d1, past_len=24, future_len=12, scaling_method="minmax", scale_targets=True, split_config=(0.7, 0.15, 0.15)
+            d1_dataset=d1, past_len=24, future_len=12, scaling_method="minmax", scale_targets=True, split_ratio=(0.7, 0.15, 0.15)
         )
+        d2.setup(stage="fit")
 
         # Collect features
         all_features = []
@@ -353,8 +363,9 @@ class TestD2TargetScaling:
             future_len=12,
             scaling_method="standard",
             scale_targets=True,
-            split_config=(0.7, 0.15, 0.15),
+            split_ratio=(0.7, 0.15, 0.15),
         )
+        d2.setup(stage="fit")
 
         # STRONG VALIDATION: Scaling should work even with chunked data
         all_features = []
@@ -473,7 +484,9 @@ class TestD2SplitValidation:
     """Test data splitting validation."""
 
     def test_split_ratio_sum(self, d1_basic):
-        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15))
+        d2 = EncoderDecoder(d1_basic, past_len=24, future_len=12, split_ratio=(0.7, 0.15, 0.15))
+        d2.setup(stage="fit")
+        d2.setup(stage="test")
 
         total = len(d2.train_dataset) + len(d2.val_dataset) + len(d2.test_dataset)
         train_pct = len(d2.train_dataset) / total
@@ -602,9 +615,11 @@ def test_d2_auto_setup_with_split_config():
         past_len=24,
         future_len=12,
         batch_size=8,
-        split_config=(0.7, 0.15, 0.15),  # Auto-setup
+        split_ratio=(0.7, 0.15, 0.15),
         scaling_method="standard",
     )
+    d2.setup(stage="fit")
+    d2.setup(stage="test")
 
     # Datasets should be created
     assert d2.train_dataset is not None, "train_dataset should be created"
@@ -648,13 +663,14 @@ def test_d2_manual_setup():
         global_forecasting=False,
     )
 
-    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, scaling_method="standard")
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, scaling_method="standard", split_ratio=(0.7, 0.15, 0.15))
 
     # Before setup
     assert d2.train_dataset is None, "Datasets should be None before setup"
 
     # Call setup manually
-    d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+    d2.setup(stage="fit")  # Creates train + val
+    d2.setup(stage="test")  # Creates test
 
     # After setup
     assert d2.train_dataset is not None, "train_dataset should be created after setup"
@@ -687,7 +703,7 @@ def test_d2_inherits_memory_efficient():
         global_forecasting=False,
     )
 
-    d2 = EncoderDecoder(d1, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15), scaling_method="standard")
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, split_ratio=(0.7, 0.15, 0.15), scaling_method="standard")
 
     # D2 should inherit from D1
     assert d2.memory_efficient == d1.memory_efficient, "D2 should inherit memory_efficient from D1"
@@ -718,8 +734,9 @@ def test_d2_scaling_produces_normalized_data():
     )
 
     d2 = EncoderDecoder(
-        d1, past_len=24, future_len=12, split_config=(0.7, 0.15, 0.15), scaling_method="standard", scale_targets=True
+        d1, past_len=24, future_len=12, split_ratio=(0.7, 0.15, 0.15), scaling_method="standard", scale_targets=True
     )
+    d2.setup(stage="fit")
 
     # Scaler should be fitted
     assert d2.is_scaler_fitted is True, "Scaler should be fitted"
@@ -764,7 +781,7 @@ def test_d2_dataloader_batch_structure():
         global_forecasting=False,
     )
 
-    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, split_config=(0.7, 0.15, 0.15), scaling_method="standard")
+    d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=8, split_ratio=(0.7, 0.15, 0.15), scaling_method="standard")
 
     train_loader = d2.train_dataloader()
     batch = next(iter(train_loader))
@@ -817,10 +834,11 @@ def test_end_to_end_d1_d2_workflow():
         past_len=24,
         future_len=12,
         batch_size=8,
-        split_config=(0.7, 0.15, 0.15),
+        split_ratio=(0.7, 0.15, 0.15),
         scaling_method="standard",
         scale_targets=True,
     )
+    d2.setup(stage="fit")
 
     assert d2.train_dataset is not None, "D2 should be set up"
     assert d2.is_scaler_fitted is True, "Scaler should be fitted"
@@ -840,6 +858,283 @@ def test_end_to_end_d1_d2_workflow():
     assert 0.5 < batch_std < 2.0, f"Scaled batch std should be ~1, got {batch_std}"
 
     logger.info("✓ End-to-end workflow test passed")
+
+
+def test_scaling_consistency_across_memory_modes():
+    """
+    Test that scaling produces identical results regardless of memory_efficient mode.
+
+    Key aspects:
+    1. Same D1 dataset used for both D2 instances
+    2. Same split indices used for both
+    3. Same data points compared (no shuffling)
+    4. Scaler parameters should be identical
+    5. Scaled values should match exactly
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("TEST: Scaling Consistency Across memory_efficient Modes")
+    logger.info("=" * 80)
+
+    # Create test data with known values
+    np.random.seed(42)
+    n_samples = 200
+    data = []
+    for t in range(n_samples):
+        data.append(
+            {
+                "time": t,
+                "group_id": f"g_{t%3}",
+                "feature_1": np.sin(t / 10) * 10 + 5,  # Range: ~-5 to 15
+                "feature_2": np.cos(t / 15) * 20 + 50,  # Range: ~30 to 70
+                "target": np.sin(t / 5) * 100 + 200,  # Range: ~100 to 300
+            }
+        )
+    df = pd.DataFrame(data)
+
+    # Create temporary file
+    temp_dir = tempfile.mkdtemp()
+    csv_path = os.path.join(temp_dir, "test_scaling.csv")
+    df.to_csv(csv_path, index=False)
+
+    try:
+        # Create D1 datasets for both modes
+        # Mode 1: memory_efficient=False (pre-transform)
+        d1_precompute = MultiSourceTSDataSet(
+            file_paths=[csv_path],
+            group_cols=["group_id"],
+            time_col="time",
+            target_cols=["target"],
+            num_cols=["feature_1", "feature_2"],
+            memory_efficient=False,  # Pre-transform mode
+        )
+
+        # Mode 2: memory_efficient=True (on-the-fly)
+        d1_onthefly = MultiSourceTSDataSet(
+            file_paths=[csv_path],
+            group_cols=["group_id"],
+            time_col="time",
+            target_cols=["target"],
+            num_cols=["feature_1", "feature_2"],
+            memory_efficient=True,  # On-the-fly mode
+        )
+
+        logger.info("\n1. D1 Datasets Created:")
+        logger.info(f"   Mode 1 (pre-transform) - Total samples: {len(d1_precompute)}")
+        logger.info(f"   Mode 2 (on-the-fly) - Total samples: {len(d1_onthefly)}")
+        logger.info(f"   Groups: {len(d1_precompute._group_ids)}")
+
+        # ===== MODE 1: memory_efficient=False (pre-transform) =====
+        logger.info("\n2. Creating D2 with memory_efficient=False (pre-transform mode)...")
+        d2_precompute = EncoderDecoder(
+            d1_precompute,
+            past_len=24,
+            future_len=12,
+            batch_size=16,
+            split_ratio=(0.7, 0.15, 0.15),
+            scaling_method="standard",
+            scale_targets=True,
+        )
+
+        # Manually call setup to fit scaler
+        d2_precompute.setup(stage="fit")
+
+        logger.info("   ✓ D2 (pre-transform) initialized")
+        logger.info(f"   Train windows: {len(d2_precompute.train_indices)}")
+        logger.info(f"   Val windows: {len(d2_precompute.val_indices)}")
+        logger.info(f"   Test windows: {len(d2_precompute.test_indices)}")
+
+        # Get scaler parameters from mode 1
+        scaler_mean_1 = d2_precompute.feature_scaler.mean_.copy()
+        scaler_scale_1 = d2_precompute.feature_scaler.scale_.copy()
+        target_scaler_mean_1 = d2_precompute.target_scaler.mean_.copy()
+        target_scaler_scale_1 = d2_precompute.target_scaler.scale_.copy()
+
+        logger.info("\n   Scaler Parameters (Mode 1 - Pre-transform):")
+        logger.info(f"     Feature mean: {scaler_mean_1[:2]}")
+        logger.info(f"     Feature scale: {scaler_scale_1[:2]}")
+        logger.info(f"     Target mean: {target_scaler_mean_1}")
+        logger.info(f"     Target scale: {target_scaler_scale_1}")
+
+        # Get train indices from mode 1 (to use same data points)
+        train_indices_1 = d2_precompute.train_indices.copy()
+
+        # ===== MODE 2: memory_efficient=True (on-the-fly) =====
+        logger.info("\n3. Creating D2 with memory_efficient=True (on-the-fly mode)...")
+        d2_onthefly = EncoderDecoder(
+            d1_onthefly,
+            past_len=24,
+            future_len=12,
+            batch_size=16,
+            split_ratio=(0.7, 0.15, 0.15),
+            scaling_method="standard",
+            scale_targets=True,
+        )
+
+        # Manually call setup to fit scaler
+        d2_onthefly.setup(stage="fit")
+
+        logger.info("   ✓ D2 (on-the-fly) initialized")
+        logger.info(f"   Train windows: {len(d2_onthefly.train_indices)}")
+        logger.info(f"   Val windows: {len(d2_onthefly.val_indices)}")
+        logger.info(f"   Test windows: {len(d2_onthefly.test_indices)}")
+
+        # Get scaler parameters from mode 2
+        scaler_mean_2 = d2_onthefly.feature_scaler.mean_.copy()
+        scaler_scale_2 = d2_onthefly.feature_scaler.scale_.copy()
+        target_scaler_mean_2 = d2_onthefly.target_scaler.mean_.copy()
+        target_scaler_scale_2 = d2_onthefly.target_scaler.scale_.copy()
+
+        logger.info("\n   Scaler Parameters (Mode 2 - On-the-fly):")
+        logger.info(f"     Feature mean: {scaler_mean_2[:2]}")
+        logger.info(f"     Feature scale: {scaler_scale_2[:2]}")
+        logger.info(f"     Target mean: {target_scaler_mean_2}")
+        logger.info(f"     Target scale: {target_scaler_scale_2}")
+
+        # Get train indices from mode 2
+        train_indices_2 = d2_onthefly.train_indices.copy()
+
+        # ===== VERIFICATION 1: Scaler Parameters Should Be Identical =====
+        logger.info("\n4. Verifying Scaler Parameters Match:")
+
+        # Check if train indices are the same
+        assert len(train_indices_1) == len(
+            train_indices_2
+        ), f"Train indices length mismatch: {len(train_indices_1)} vs {len(train_indices_2)}"
+        assert np.array_equal(train_indices_1, train_indices_2), "Train indices should be identical"
+        logger.info(f"   ✓ Train indices match: {len(train_indices_1)} windows")
+
+        # Check feature scaler mean
+        assert np.allclose(
+            scaler_mean_1, scaler_mean_2, rtol=1e-5
+        ), f"Feature scaler mean mismatch: {scaler_mean_1[:2]} vs {scaler_mean_2[:2]}"
+        logger.info("   ✓ Feature scaler mean matches")
+
+        # Check feature scaler scale
+        assert np.allclose(
+            scaler_scale_1, scaler_scale_2, rtol=1e-5
+        ), f"Feature scaler scale mismatch: {scaler_scale_1[:2]} vs {scaler_scale_2[:2]}"
+        logger.info("   ✓ Feature scaler scale matches")
+
+        # Check target scaler mean
+        assert np.allclose(
+            target_scaler_mean_1, target_scaler_mean_2, rtol=1e-5
+        ), f"Target scaler mean mismatch: {target_scaler_mean_1} vs {target_scaler_mean_2}"
+        logger.info("   ✓ Target scaler mean matches")
+
+        # Check target scaler scale
+        assert np.allclose(
+            target_scaler_scale_1, target_scaler_scale_2, rtol=1e-5
+        ), f"Target scaler scale mismatch: {target_scaler_scale_1} vs {target_scaler_scale_2}"
+        logger.info("   ✓ Target scaler scale matches")
+
+        # ===== VERIFICATION 2: Scaled Values Should Be Identical =====
+        logger.info("\n5. Verifying Scaled Values Match (Using Same Data Points):")
+
+        # Get specific window indices to compare (use first 5 from train set)
+        test_window_indices = train_indices_1[:5]
+
+        for window_num, window_idx in enumerate(test_window_indices):
+            logger.info(f"\n   Comparing window {window_num + 1}/{len(test_window_indices)} (index={window_idx}):")
+
+            # Get data from mode 1 (pre-transform)
+            x1, y1 = d2_precompute.dataset[window_idx]
+            x_num_past_1 = x1["x_num_past"].numpy()
+            y_1 = y1.numpy()
+
+            # Get data from mode 2 (on-the-fly)
+            x2, y2 = d2_onthefly.dataset[window_idx]
+            x_num_past_2 = x2["x_num_past"].numpy()
+            y_2 = y2.numpy()
+
+            # Compare feature values
+            assert np.allclose(
+                x_num_past_1, x_num_past_2, rtol=1e-5, atol=1e-7
+            ), f"Feature values mismatch at window {window_idx}"
+            logger.info(f"     ✓ Feature values match (shape: {x_num_past_1.shape})")
+            logger.info("       Sample values (first 3 timesteps, first 2 features):")
+            logger.info(f"         Mode 1: {x_num_past_1[:3, :2]}")
+            logger.info(f"         Mode 2: {x_num_past_2[:3, :2]}")
+
+            # Compare target values
+            assert np.allclose(y_1, y_2, rtol=1e-5, atol=1e-7), f"Target values mismatch at window {window_idx}"
+            logger.info(f"     ✓ Target values match (shape: {y_1.shape})")
+            logger.info("       Sample values (first 3 timesteps):")
+            logger.info(f"         Mode 1: {y_1[:3, 0]}")
+            logger.info(f"         Mode 2: {y_2[:3, 0]}")
+
+        # ===== VERIFICATION 3: Batch-Level Statistics Should Match =====
+        logger.info("\n6. Verifying Batch-Level Statistics Match:")
+
+        # Create dataloaders with shuffle=False to ensure consistent ordering
+        loader_1 = DataLoader(
+            d2_precompute.train_dataset,
+            batch_size=16,
+            shuffle=False,  # No shuffle for comparison
+            num_workers=0,
+        )
+        loader_2 = DataLoader(
+            d2_onthefly.train_dataset,
+            batch_size=16,
+            shuffle=False,  # No shuffle for comparison
+            num_workers=0,
+        )
+
+        # Get first batch from each
+        batch_1 = next(iter(loader_1))
+        batch_2 = next(iter(loader_2))
+
+        # Handle both tuple and dict formats
+        if isinstance(batch_1, (tuple, list)):
+            x_dict_1, y_batch_1 = batch_1
+            x_dict_2, y_batch_2 = batch_2
+            x_num_past_batch_1 = x_dict_1["x_num_past"].numpy()
+            x_num_past_batch_2 = x_dict_2["x_num_past"].numpy()
+            y_batch_1 = y_batch_1.numpy()
+            y_batch_2 = y_batch_2.numpy()
+        else:
+            x_num_past_batch_1 = batch_1["x_num_past"].numpy()
+            x_num_past_batch_2 = batch_2["x_num_past"].numpy()
+            y_batch_1 = batch_1["y"].numpy()
+            y_batch_2 = batch_2["y"].numpy()
+
+        # Compare batch statistics
+        mean_1 = x_num_past_batch_1.mean()
+        mean_2 = x_num_past_batch_2.mean()
+        std_1 = x_num_past_batch_1.std()
+        std_2 = x_num_past_batch_2.std()
+
+        logger.info("   Feature batch statistics:")
+        logger.info(f"     Mode 1 - Mean: {mean_1:.6f}, Std: {std_1:.6f}")
+        logger.info(f"     Mode 2 - Mean: {mean_2:.6f}, Std: {std_2:.6f}")
+
+        assert np.allclose(mean_1, mean_2, rtol=1e-5, atol=1e-7), f"Batch mean mismatch: {mean_1} vs {mean_2}"
+        assert np.allclose(std_1, std_2, rtol=1e-5, atol=1e-7), f"Batch std mismatch: {std_1} vs {std_2}"
+        logger.info("   ✓ Feature batch statistics match")
+
+        # Compare target batch statistics
+        target_mean_1 = y_batch_1.mean()
+        target_mean_2 = y_batch_2.mean()
+        target_std_1 = y_batch_1.std()
+        target_std_2 = y_batch_2.std()
+
+        logger.info("   Target batch statistics:")
+        logger.info(f"     Mode 1 - Mean: {target_mean_1:.6f}, Std: {target_std_1:.6f}")
+        logger.info(f"     Mode 2 - Mean: {target_mean_2:.6f}, Std: {target_std_2:.6f}")
+
+        assert np.allclose(
+            target_mean_1, target_mean_2, rtol=1e-5, atol=1e-7
+        ), f"Target batch mean mismatch: {target_mean_1} vs {target_mean_2}"
+        assert np.allclose(
+            target_std_1, target_std_2, rtol=1e-5, atol=1e-7
+        ), f"Target batch std mismatch: {target_std_1} vs {target_std_2}"
+        logger.info("   ✓ Target batch statistics match")
+
+        logger.info("\n" + "=" * 80)
+        logger.info("✓ ALL TESTS PASSED: Scaling is consistent across memory_efficient modes")
+        logger.info("=" * 80)
+
+    finally:
+        shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":
