@@ -55,6 +55,39 @@ class EncoderDecoderDataset(Dataset):
         self.feature_scaler = None
         self.target_scaler = None
 
+        # --- OPTIMIZATION: Pre-calculate all static indices ONCE ---
+        meta = getattr(self.d1_dataset, "metadata", {}) or {}
+
+        # Get D1 metadata (source of truth)
+        self.idx_cat_past = list(meta.get("idx_categorical", []))  # All categorical indices
+        idx_future_all = set(meta.get("idx_future", []))  # All future-known indices
+        idx_targets_full = list(meta.get("idx_targets", []))
+        self.global_forecasting = meta.get("global_forecasting", True)
+
+        n_features = int(meta.get("n_features", 0))
+        all_idx = set(range(n_features))
+
+        # Calculate numeric indices ONCE (all non-categorical)
+        self.idx_num = sorted(list(all_idx - set(self.idx_cat_past)))
+
+        # Calculate future categorical indices ONCE (intersection of categorical and future)
+        self.idx_cat_future = sorted(list(set(self.idx_cat_past) & idx_future_all))
+
+        # Calculate future numeric indices ONCE (intersection of numeric and future)
+        self.idx_num_future = sorted(list(set(self.idx_num) & idx_future_all))
+
+        # Calculate target index mapping ONCE
+        num_pos_map = {orig: pos for pos, orig in enumerate(self.idx_num)}
+        mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
+        self.idx_target_tensor = torch.tensor(mapped_targets, dtype=torch.long)
+
+        logger.debug("[EncoderDecoderDataset] Pre-calculated indices:")
+        logger.debug(f"  idx_num: {len(self.idx_num)} features")
+        logger.debug(f"  idx_cat_past: {len(self.idx_cat_past)} features")
+        logger.debug(f"  idx_cat_future: {len(self.idx_cat_future)} features")
+        logger.debug(f"  idx_num_future: {len(self.idx_num_future)} features")
+        # --- End of optimization ---
+
         # Setup LRU cache for transformed windows if enabled
         if self.use_cache:
             self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_transformed_window_impl)
@@ -82,6 +115,7 @@ class EncoderDecoderDataset(Dataset):
     def _get_window_no_cache(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
         Get a sample with encoder-decoder structure (no caching).
+        OPTIMIZED: Uses pre-calculated indices from __init__ - no redundant calculations.
         """
         window = self.valid_windows[idx]
         group_idx = window["group_idx"]
@@ -90,133 +124,48 @@ class EncoderDecoderDataset(Dataset):
         logger.debug(f"Getting item {idx} - window: group_idx={group_idx}, start_idx={start_idx}")
         group_sample = self.d1_dataset[group_idx]
 
-        # Use D1 metadata as source of truth for indices
-        meta: Dict[str, Any] = getattr(self.d1_dataset, "metadata", {}) or {}
-        d1_metadata = meta  # Make d1_metadata available in this scope
-        idx_categorical: List[int] = list(meta.get("idx_categorical", []))
-        feature_cols = meta.get("feature_cols", [])
-        enrich_cat = meta.get("enrich_cat", [])
-        if idx == 0:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Group sample keys: {list(group_sample.keys())}")
-                for key, value in group_sample.items():
-                    if isinstance(value, torch.Tensor):
-                        logger.debug(f"  {key}: tensor of shape {tuple(value.shape)}")
-                    else:
-                        logger.debug(f"  {key}: {type(value)}")
-
-        # Extract the window from the group's sequence
+        # --- 1. Slice tensors from D1 data ---
         past_end = start_idx + self.past_len
         future_end = past_end + self.future_len
-        logger.debug(f"Window indices: start={start_idx}, past_end={past_end}, future_end={future_end}")
 
-        # Extract past features and future targets from the group's tensors
-        future_targets = group_sample["y"][past_end:future_end]  # [future_len, n_targets]
-        logger.debug(f"Extracted future_targets with shape: {tuple(future_targets.shape)}")
-        x = {}
-
-        idx_future: List[int] = list(meta.get("idx_future", []))  # Features available in future
-
-        global_forecasting = d1_metadata.get("global_forecasting", True)
-        if not global_forecasting:
-            group_cols = meta.get("group_cols", [])
-            feature_cols = meta.get("feature_cols", [])
-            for group_col in group_cols:
-                if group_col in feature_cols:
-                    group_idx = feature_cols.index(group_col)
-                    if group_idx not in idx_future:
-                        idx_future.append(group_idx)
-                        logger.debug(
-                            f"Auto-added group column '{group_col}' (idx: {group_idx}) to idx_future for non-global forecasting"
-                        )
-
-        idx_targets_full: List[int] = list(meta.get("idx_targets", []))
-
-        # Ensure all temporal features are treated as categorical
-        if enrich_cat and feature_cols:
-            for temporal_feature in enrich_cat:
-                if temporal_feature in feature_cols:
-                    feature_idx = feature_cols.index(temporal_feature)
-                    if feature_idx not in idx_categorical:
-                        idx_categorical.append(feature_idx)
-
-        # Determine numeric feature indices as complement of categorical
-        n_features = int(meta.get("n_features", group_sample["x"].shape[1]))
-        all_idx = list(range(n_features))
-        idx_num = [i for i in all_idx if i not in idx_categorical]
-
-        # Slice past/future from full X
         X_full = group_sample["x"]
         X_past = X_full[start_idx:past_end]
         X_future = X_full[past_end:future_end]
+        y = group_sample["y"][past_end:future_end]  # Future targets
 
-        # Split numeric and categorical tensors with correct dtypes
-        x_num_past = X_past[:, idx_num].float() if len(idx_num) > 0 else torch.zeros((self.past_len, 0), dtype=torch.float32)
-        x["x_num_past"] = x_num_past
+        x = {}  # Output dictionary
 
-        if len(idx_categorical) > 0:
-            x_cat_past = X_past[:, idx_categorical].long()
-            x["x_cat_past"] = x_cat_past
+        # --- 2. Slice Past (using pre-calculated indices) ---
+        x["x_num_past"] = (
+            X_past[:, self.idx_num].float() if len(self.idx_num) > 0 else torch.zeros((self.past_len, 0), dtype=torch.float32)
+        )
 
-        # Future features (split into num/cat)
+        if len(self.idx_cat_past) > 0:
+            x["x_cat_past"] = X_past[:, self.idx_cat_past].long()
+
+        # --- 3. Slice Future (using pre-calculated indices) ---
         if self.future_len > 0:
-            # For numeric features
-            if len(idx_future) > 0:
-                future_num_idx = [i for i in idx_future if i in idx_num]
-                if len(future_num_idx) > 0:
-                    x["x_num_future"] = X_future[:, future_num_idx].float()
+            if len(self.idx_num_future) > 0:
+                x["x_num_future"] = X_future[:, self.idx_num_future].float()
 
-            future_cat_indices = []
-            future_cat_names = []
-            if enrich_cat and feature_cols:
-                for temporal_feature in enrich_cat:
-                    if temporal_feature in feature_cols:
-                        feature_idx = feature_cols.index(temporal_feature)
-                        if feature_idx in idx_categorical and feature_idx not in future_cat_indices:
-                            future_cat_indices.append(feature_idx)
-                            future_cat_names.append(temporal_feature)
+            if len(self.idx_cat_future) > 0:
+                x["x_cat_future"] = X_future[:, self.idx_cat_future].long()
 
-            if len(idx_future) > 0:
-                future_cat_idx = [i for i in idx_future if i in idx_categorical]
-                for idx in future_cat_idx:
-                    if idx not in future_cat_indices and idx < len(feature_cols):
-                        feature_name = feature_cols[idx]
-                        future_cat_indices.append(idx)
-                        future_cat_names.append(feature_name)
-                        logger.info(f"Including '{feature_name}' in x_cat_future (future categorical)")
+        # --- 4. Add targets and metadata ---
+        x["y"] = y.float()
+        x["idx_target"] = self.idx_target_tensor
+        x["time_idx"] = start_idx
 
-            # Create x_cat_future tensor if we have categorical features
-            if len(future_cat_indices) > 0:
-                x_cat_future = X_future[:, future_cat_indices].long()
-                x["x_cat_future"] = x_cat_future
-                logger.debug(f"x_cat_future shape: {tuple(x_cat_future.shape)} ({len(future_cat_indices)} features)")
-            else:
-                logger.debug("No categorical features for x_cat_future")
-
-        x["y"] = future_targets.float()
-        num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
-        mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
-        if len(mapped_targets) == 0 and len(idx_targets_full) > 0:
-            logger.warning("All targets mapped to non-numeric features; idx_target will be empty")
-        x["idx_target"] = torch.tensor(mapped_targets, dtype=torch.long)
-
-        if self.include_target_in_decoder and self.future_len > 0:
-            x["decoder_target"] = future_targets.float()
-
-        global_forecasting = d1_metadata.get("global_forecasting", True)
-
-        if global_forecasting:
+        if self.global_forecasting:
             group_id = window.get("group_id", 0)
             if isinstance(group_id, str):
+                meta = getattr(self.d1_dataset, "metadata", {}) or {}
                 meta_group_mapping = meta.get("group_mapping", {})
                 group_id = meta_group_mapping.get(group_id, 0)
-                x["group_id"] = int(group_id)
-            elif isinstance(group_id, (int, float)):
-                x["group_id"] = int(group_id)
-            else:
-                x["group_id"] = group_id
-        x["time_idx"] = start_idx
-        y = future_targets
+            x["group_id"] = int(group_id) if isinstance(group_id, (int, float, str)) else group_id
+
+        if self.include_target_in_decoder and self.future_len > 0:
+            x["decoder_target"] = y.float()
 
         # Apply scaling on-the-fly if scaler is fitted
         if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
@@ -907,47 +856,39 @@ class EncoderDecoder(pl.LightningDataModule):
 
         logger.info(f"  Extracted {len(all_x_past_list)} windows successfully")
 
-        # Extract numeric features for ALL windows at once
-        if len(idx_num) > 0:
-            all_x_num_past = X_past_all[:, :, idx_num]
-
-            future_num_idx = [i for i in idx_future if i in idx_num]
-            if len(future_num_idx) > 0:
-                all_x_num_future = X_future_all[:, :, future_num_idx]
-            else:
-                all_x_num_future = None
-        else:
-            all_x_num_past = None
-            all_x_num_future = None
-
-        # Store targets and categorical features
-        all_y = y_future_all
+        # Store full feature arrays and targets
         all_X_past = X_past_all
         all_X_future = X_future_all
+        all_y = y_future_all
 
-        # Transform ALL numeric features in one shot (already vectorized!)
+        # Compute future numeric indices for later use
+        future_num_idx = [i for i in idx_future if i in idx_num] if len(idx_num) > 0 else []
+
+        # Transform numeric features in-place in the full arrays
         logger.info("  Applying scaling transformation (single call, fully vectorized)...")
 
-        if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
-            # Transform x_num_past - already a numpy array (n_windows, past_len, n_features)
-            if all_x_num_past is not None:
-                original_shape = all_x_num_past.shape
-                # Reshape to 2D: (n_windows * past_len, n_features)
-                reshaped = all_x_num_past.reshape(-1, original_shape[-1])
-                # Transform ALL at once - SINGLE CALL!
-                transformed = self.feature_scaler.transform(reshaped)
-                # Reshape back: (n_windows, past_len, n_features)
-                all_x_num_past = transformed.reshape(original_shape)
-                logger.info(
-                    f" Transformed {len(indices)} windows × {self.past_len} timesteps= {reshaped.shape[0]} values in single call"
-                )
+        if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_") and len(idx_num) > 0:
+            # Transform numeric features in all_X_past
+            n_windows, past_len, n_features = all_X_past.shape
+            # Extract numeric features
+            x_num_past = all_X_past[:, :, idx_num]
+            # Reshape to 2D: (n_windows * past_len, n_num_features)
+            reshaped = x_num_past.reshape(-1, len(idx_num))
+            # Transform ALL at once - SINGLE CALL!
+            transformed = self.feature_scaler.transform(reshaped)
+            # Reshape back and update in-place
+            all_X_past[:, :, idx_num] = transformed.reshape(n_windows, past_len, len(idx_num))
+            logger.info(
+                f"  Transformed {len(indices)} windows × {self.past_len} timesteps = {reshaped.shape[0]} values in single call"
+            )
 
-            # Transform x_num_future
-            if all_x_num_future is not None:
-                original_shape = all_x_num_future.shape
-                reshaped = all_x_num_future.reshape(-1, original_shape[-1])
+            # Transform numeric features in all_X_future if present
+            if len(future_num_idx) > 0:
+                n_windows, future_len, n_features = all_X_future.shape
+                x_num_future = all_X_future[:, :, future_num_idx]
+                reshaped = x_num_future.reshape(-1, len(future_num_idx))
                 transformed = self.feature_scaler.transform(reshaped)
-                all_x_num_future = transformed.reshape(original_shape)
+                all_X_future[:, :, future_num_idx] = transformed.reshape(n_windows, future_len, len(future_num_idx))
 
         # Transform targets if enabled
         if self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
@@ -957,21 +898,40 @@ class EncoderDecoder(pl.LightningDataModule):
             transformed_y = self.target_scaler.transform(reshaped)
             all_y = transformed_y.reshape(original_shape)
 
-        # Pre-compute future categorical indices once
-        future_cat_indices = []
-        if len(idx_categorical) > 0:
-            if enrich_cat and feature_cols:
-                for temporal_feature in enrich_cat:
-                    if temporal_feature in feature_cols:
-                        feature_idx = feature_cols.index(temporal_feature)
-                        if feature_idx in idx_categorical and feature_idx not in future_cat_indices:
-                            future_cat_indices.append(feature_idx)
+        # Pre-compute future categorical indices once (efficiently using set intersection)
+        future_cat_indices = sorted(list(set(idx_categorical) & set(idx_future)))
 
-            if len(idx_future) > 0:
-                future_cat_idx = [i for i in idx_future if i in idx_categorical]
-                for idx in future_cat_idx:
-                    if idx not in future_cat_indices:
-                        future_cat_indices.append(idx)
+        # Compute separate cardinalities for past and future categorical features
+        cat_cardinalities_all = meta.get("cat_cardinalities", [])
+        cat_cols_list = meta.get("cat_cols_list", [])
+
+        cat_past_cardinalities = []
+        cat_future_cardinalities = []
+
+        if len(idx_categorical) > 0 and len(cat_cols_list) > 0 and len(feature_cols) > 0:
+            # Create mapping from column name to cardinality
+            col_to_cardinality = {col: card for col, card in zip(cat_cols_list, cat_cardinalities_all)}
+
+            # Map past categorical indices to cardinalities (preserving order)
+            for cat_idx in idx_categorical:
+                if cat_idx < len(feature_cols):
+                    col_name = feature_cols[cat_idx]
+                    if col_name in col_to_cardinality:
+                        cat_past_cardinalities.append(col_to_cardinality[col_name])
+
+            # Map future categorical indices to cardinalities (preserving order)
+            for cat_idx in future_cat_indices:
+                if cat_idx < len(feature_cols):
+                    col_name = feature_cols[cat_idx]
+                    if col_name in col_to_cardinality:
+                        cat_future_cardinalities.append(col_to_cardinality[col_name])
+
+        # Store in metadata (removed name tracking - not needed)
+        meta_updated = meta.copy()
+        meta_updated["cat_past_cardinalities"] = cat_past_cardinalities
+        meta_updated["cat_future_cardinalities"] = cat_future_cardinalities
+        meta_updated["idx_categorical"] = idx_categorical
+        meta_updated["future_cat_indices"] = future_cat_indices
 
         # Pre-compute idx_target mapping once
         num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
@@ -983,18 +943,18 @@ class EncoderDecoder(pl.LightningDataModule):
         from .utils import VectorizedPreTransformedDataset
 
         return VectorizedPreTransformedDataset(
-            all_x_num_past,
-            all_x_num_future,
             all_X_past,
             all_X_future,
             all_y,
             list(range(len(all_window_info))),  # Use sequential indices
             all_window_info,  # Use extracted window info
+            idx_num,
             idx_categorical,
+            future_num_idx,
             future_cat_indices,
             idx_target_tensor,
             global_forecasting,
-            meta,
+            meta_updated,
         )
 
     def _pretransform_dataset(self, dataset):

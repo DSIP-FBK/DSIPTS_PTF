@@ -252,28 +252,28 @@ class VectorizedPreTransformedDataset:
 
     def __init__(
         self,
-        all_x_num_past,
-        all_x_num_future,
         all_X_past,
         all_X_future,
         all_y,
         indices,
         valid_windows,
+        idx_num,
         idx_categorical,
+        future_num_idx,
         future_cat_indices,
         idx_target_tensor,
         global_forecasting,
         meta,
     ):
         """Store vectorized data."""
-        self.all_x_num_past = all_x_num_past
-        self.all_x_num_future = all_x_num_future
         self.all_X_past = all_X_past
         self.all_X_future = all_X_future
         self.all_y = all_y
         self.indices = indices
         self.valid_windows = valid_windows
+        self.idx_num = idx_num
         self.idx_categorical = idx_categorical
+        self.future_num_idx = future_num_idx
         self.future_cat_indices = future_cat_indices
         self.idx_target_tensor = idx_target_tensor
         self.global_forecasting = global_forecasting
@@ -290,21 +290,21 @@ class VectorizedPreTransformedDataset:
 
         x = {}
 
-        # Add numeric features
-        if self.all_x_num_past is not None:
-            x["x_num_past"] = torch.from_numpy(self.all_x_num_past[idx]).float()
+        # Add numeric features by slicing from full arrays
+        if len(self.idx_num) > 0:
+            x["x_num_past"] = torch.from_numpy(self.all_X_past[idx, :, :][:, self.idx_num]).float()
         else:
             x["x_num_past"] = torch.zeros((self.all_X_past.shape[1], 0), dtype=torch.float32)
 
-        if self.all_x_num_future is not None:
-            x["x_num_future"] = torch.from_numpy(self.all_x_num_future[idx]).float()
+        if len(self.future_num_idx) > 0:
+            x["x_num_future"] = torch.from_numpy(self.all_X_future[idx, :, self.future_num_idx]).float()
 
-        # Add categorical features
+        # Add categorical features by slicing from full arrays
         if len(self.idx_categorical) > 0:
-            x["x_cat_past"] = torch.from_numpy(self.all_X_past[idx, :, self.idx_categorical]).long()
+            x["x_cat_past"] = torch.from_numpy(self.all_X_past[idx, :, :][:, self.idx_categorical]).long()
 
             if len(self.future_cat_indices) > 0:
-                x["x_cat_future"] = torch.from_numpy(self.all_X_future[idx, :, self.future_cat_indices]).long()
+                x["x_cat_future"] = torch.from_numpy(self.all_X_future[idx, :, :][:, self.future_cat_indices]).long()
 
         # Add targets
         y = torch.from_numpy(self.all_y[idx]).float()
