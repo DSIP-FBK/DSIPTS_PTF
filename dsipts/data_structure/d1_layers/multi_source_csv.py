@@ -124,9 +124,12 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.global_forecasting = global_forecasting
         self.add_target_to_past = add_target_to_past
 
+        # Initialize past and future columns, tracking if they were explicitly provided
+        self._past_cols_provided = past_cols is not None and len(past_cols) > 0
+        self._future_cols_provided = future_cols is not None and len(future_cols) > 0
         self._past_cols = past_cols or []
         self._future_cols = future_cols or []
-        self._original_future_cols = self._future_cols.copy() if self._future_cols else []
+        self._original_future_cols = future_cols.copy() if future_cols else []
 
         # if global_forecasting =False and multiple groups exist, add group columns to categorical and future variables
         self._apply_global_forecasting_logic()
@@ -164,6 +167,9 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._prepare_metadata()
         if not self.memory_efficient:
             self._preload_data()
+
+        # Update metadata with actual cardinalities from data (works for both memory modes)
+        self._update_metadata_after_preload()
 
     def _infer_feature_columns(self) -> List[str]:
         """
@@ -218,6 +224,24 @@ class MultiSourceTSDataSet(BaseD1Layer):
     def _validate_enrich_cat(self):
         """Validate the enrich_cat parameter and update categorical, future and past columns"""
         validate_enrich_cat(self._enrich_cat)
+
+        # If past_cols not explicitly provided by user, add all cat_cols to it
+        if not self._past_cols_provided:
+            logger.info("NOTE: 'past_cols' arg not provided by the user, all the categorical columns are added to past_cols")
+            # Add all cat_cols that aren't already in past_cols
+            for col in self._cat_cols:
+                if col not in self._past_cols:
+                    self._past_cols.append(col)
+
+        # If future_cols not explicitly provided by user, add all cat_cols to it
+        if not self._future_cols_provided:
+            logger.info("NOTE: 'future_cols' arg not provided by the user, all the categorical columns are added to future_cols")
+            # Add all cat_cols that aren't already in future_cols
+            for col in self._cat_cols:
+                if col not in self._future_cols:
+                    self._future_cols.append(col)
+
+        # Add temporal enrichment features to both past and future
         for option in self._enrich_cat:
             if option not in self._cat_cols:
                 self._cat_cols.append(option)
@@ -520,7 +544,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.dataset_length = self.cumulative_lengths[-1]
 
         # Calculate feature indices
-        cat_indices = [self.feature_cols.index(col) for col in (self._cat_cols or []) if col in self.feature_cols]
         past_indices = [self.feature_cols.index(col) for col in (self._past_cols or []) if col in self.feature_cols]
         future_indices = [self.feature_cols.index(col) for col in (self._future_cols or []) if col in self.feature_cols]
         target_indices = [self.feature_cols.index(col) for col in (self._target_cols or []) if col in self.feature_cols]
@@ -532,16 +555,18 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "n_categorical": len(self._cat_cols),
             "n_past": len(self.past_cols) if self.past_cols else 0,
             "n_future": len(self.future_cols) if self.future_cols else 0,
+            # Group information
+            "n_groups": len(self._group_ids),
             # Column names
             "target_cols": self._target_cols,
             "feature_cols": self.feature_cols,
             # Feature indices
-            "idx_categorical": cat_indices,
             "idx_past": past_indices,
             "idx_future": future_indices,
             "idx_targets": target_indices,
-            # Group information
-            "n_groups": len(self._group_ids),
+            # Categorical indices (will be populated after building cat_past_list)
+            "idx_cat_past": [],
+            "idx_cat_future": [],
             # Column types and temporal information
             "time_col": self._time_col,
             "past_cols": self.past_cols if self.past_cols else [],
@@ -549,71 +574,120 @@ class MultiSourceTSDataSet(BaseD1Layer):
             "enrich_cat": self._enrich_cat if self._enrich_cat else [],
         }
 
-        # Add categorical information to metadata only if categorical columns exist
+        # Build categorical lists from user-provided information
+        # Step 1: Derive cat_past and cat_future from user inputs
+        cat_past_list = []
+        cat_past_cardinalities = []
+        cat_future_list = []
+        cat_future_cardinalities = []
+
+        # Determine if past_cols and future_cols are explicitly provided
+        past_cols_provided = self.past_cols and len(self.past_cols) > 0
+        future_cols_provided = self.future_cols and len(self.future_cols) > 0
+
         if self._cat_cols and len(self._cat_cols) > 0:
-            self.metadata["categorical_columns"] = self._cat_cols
-
-            # Build ordered lists of cat columns and their cardinalities
-            cat_cols_list = []
-            cat_cardinalities = []
-
-            # Process all categorical columns in order
+            # Process categorical columns that are in past
             for col in self._cat_cols:
-                # Handle group columns
-                if col in self.group_cols and hasattr(self, "group_info") and self.group_info:
-                    if col in self.label_encoders:
-                        n_categories = len(self.label_encoders[col].classes_)
-                    else:
+                # Include in past if: explicitly in past_cols OR past_cols not provided (default to all cat_cols)
+                in_past = (col in self.past_cols) if past_cols_provided else True
+
+                if in_past:
+                    # For group columns, compute cardinality from group_info
+                    # For other categorical columns, use placeholder (will be computed from data)
+                    if col in self.group_cols and hasattr(self, "group_info") and self.group_info:
                         group_values = set()
                         for group_key, info in self.group_info.items():
                             if "original_values" in info and info["group_columns"] == self.group_cols:
                                 if len(info["original_values"]) == 1:
                                     group_values.add(str(info["original_values"][0]))
                         n_categories = len(sorted(list(group_values)))
+                    else:
+                        # Placeholder - will be computed from data in _update_metadata_after_preload
+                        n_categories = 0
 
-                    cat_cols_list.append(col)
-                    cat_cardinalities.append(n_categories)
+                    cat_past_list.append(col)
+                    cat_past_cardinalities.append(n_categories)
 
-                # Handle regular categorical columns (non-group)
-                elif col in self.label_encoders:
-                    n_categories = len(self.label_encoders[col].classes_)
-                    cat_cols_list.append(col)
-                    cat_cardinalities.append(n_categories)
+            # Process categorical columns that are in future
+            for col in self._cat_cols:
+                # Include in future if: explicitly in future_cols OR future_cols not provided (default to all cat_cols)
+                in_future = (col in self.future_cols) if future_cols_provided else True
+                if in_future:
+                    if col not in self.group_cols:
+                        n_categories = 0
+                        cat_future_list.append(col)
+                        cat_future_cardinalities.append(n_categories)
+            # Step 2: Add temporal enrichment to both past and future
+            for col in self._enrich_cat:
+                if col not in cat_past_list:
+                    cat_past_list.append(col)
+                    cat_past_cardinalities.append(0)  # Placeholder
 
-            # Store as ordered lists (matching __getitem__ format)
-            self.metadata["cat_cols_list"] = cat_cols_list
-            self.metadata["cat_cardinalities"] = cat_cardinalities
+                if col not in cat_future_list:
+                    cat_future_list.append(col)
+                    cat_future_cardinalities.append(0)
 
-            # Handle group mapping
-            if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
-                # mapping from composite key to integer id for multi-column groups
-                unique_groups = [info["group_key"][0] for info in self.group_info.values()]
-                group_to_int = {group: idx for idx, group in enumerate(set(unique_groups))}
+            # Step 3: Add group columns to cat_past ONLY (if not global forecasting)
+            if not self.global_forecasting and self.group_cols:
+                for col in self.group_cols if isinstance(self.group_cols, list) else [self.group_cols]:
+                    if col not in cat_past_list and col in self._cat_cols:
+                        if col in self.label_encoders:
+                            n_categories = len(self.label_encoders[col].classes_)
+                        else:
+                            group_values = set()
+                            for group_key, info in self.group_info.items():
+                                if "original_values" in info and info["group_columns"] == self.group_cols:
+                                    if len(info["original_values"]) == 1:
+                                        group_values.add(str(info["original_values"][0]))
+                            n_categories = len(sorted(list(group_values)))
 
-                # we create reverse mapping from integer ID to original values
-                reverse_mapping = {}
-                for file_group_key, info in self.group_info.items():
-                    group_key = info["group_key"][0]
-                    if "original_values" in info:
-                        reverse_mapping[group_to_int[group_key]] = {
-                            "composite_key": group_key,
-                            "original_values": dict(zip(self.group_cols, info["original_values"])),
-                        }
+                        cat_past_list.append(col)
+                        cat_past_cardinalities.append(n_categories)
 
-                # add mappings to metadata
-                self.metadata["group_mapping"] = group_to_int
-                self.metadata["reverse_mapping"] = reverse_mapping
-                self.metadata["n_groups"] = len(group_to_int)
+        # Store categorical information in metadata
+        self.metadata["cat_past_list"] = cat_past_list
+        self.metadata["cat_past_cardinalities"] = cat_past_cardinalities
+        self.metadata["cat_future_list"] = cat_future_list
+        self.metadata["cat_future_cardinalities"] = cat_future_cardinalities
 
-            # Add group mapping for single-column group keys
-            elif self.group_cols:
-                # group_cols is a string or single-item list
-                unique_groups = [info["group_key"] for info in self.group_info.values()]
-                group_to_int = {group: idx for idx, group in enumerate(sorted(set(unique_groups)))}
-                reverse_mapping = {idx: group for group, idx in group_to_int.items()}
-                self.metadata["group_mapping"] = group_to_int
-                self.metadata["reverse_mapping"] = reverse_mapping
-                self.metadata["n_groups"] = len(group_to_int)
+        # Calculate indices from lists
+        self.metadata["idx_cat_past"] = sorted(
+            [self.feature_cols.index(col) for col in cat_past_list if col in self.feature_cols]
+        )
+        self.metadata["idx_cat_future"] = sorted(
+            [self.feature_cols.index(col) for col in cat_future_list if col in self.feature_cols]
+        )
+
+        # Handle group mapping
+        if isinstance(self.group_cols, list) and len(self.group_cols) > 1:
+            # mapping from composite key to integer id for multi-column groups
+            unique_groups = [info["group_key"][0] for info in self.group_info.values()]
+            group_to_int = {group: idx for idx, group in enumerate(set(unique_groups))}
+
+            # we create reverse mapping from integer ID to original values
+            reverse_mapping = {}
+            for file_group_key, info in self.group_info.items():
+                group_key = info["group_key"][0]
+                if "original_values" in info:
+                    reverse_mapping[group_to_int[group_key]] = {
+                        "composite_key": group_key,
+                        "original_values": dict(zip(self.group_cols, info["original_values"])),
+                    }
+
+            # add mappings to metadata
+            self.metadata["group_mapping"] = group_to_int
+            self.metadata["reverse_mapping"] = reverse_mapping
+            self.metadata["n_groups"] = len(group_to_int)
+
+        # Add group mapping for single-column group keys
+        elif self.group_cols:
+            # group_cols is a string or single-item list
+            unique_groups = [info["group_key"] for info in self.group_info.values()]
+            group_to_int = {group: idx for idx, group in enumerate(sorted(set(unique_groups)))}
+            reverse_mapping = {idx: group for group, idx in group_to_int.items()}
+            self.metadata["group_mapping"] = group_to_int
+            self.metadata["reverse_mapping"] = reverse_mapping
+            self.metadata["n_groups"] = len(group_to_int)
 
         # Add dataset structure information
         self.metadata["total_samples"] = self.dataset_length
@@ -623,38 +697,93 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self.metadata["file_paths"] = self.file_paths
         self.metadata["global_forecasting"] = self.global_forecasting
 
+    def _compute_all_categorical_cardinalities(self):
+        """Compute actual cardinalities for all categorical features from the data.
+
+        Works for both memory_efficient modes:
+        - memory_efficient=False: Uses cached_data (preloaded in memory)
+        - memory_efficient=True: Loads data on-the-fly from files
+        """
+        cardinalities = {}
+        all_cat_features = set(self._cat_cols + self._enrich_cat)
+        cat_values = {col: set() for col in all_cat_features}
+
+        # Case 1: memory_efficient=False - use preloaded cached_data
+        if hasattr(self, "cached_data") and self.cached_data:
+            logger.debug("[D1 Cardinality] Computing from cached_data (memory_efficient=False)")
+            for group_data in self.cached_data.values():
+                for col in all_cat_features:
+                    if col in group_data and len(group_data[col]) > 0:
+                        cat_values[col].update(group_data[col].unique())
+
+        # Case 2: memory_efficient=True - load data on-the-fly from files
+        else:
+            logger.debug("[D1 Cardinality] Computing from files (memory_efficient=True)")
+            for file_group_key in self._group_ids:
+                try:
+                    if self.use_dataframes:
+                        group_data = self._load_group_data_from_dataframe(file_group_key)
+                    else:
+                        group_data = self._load_group_data(file_group_key)
+
+                    for col in all_cat_features:
+                        if col in group_data and len(group_data[col]) > 0:
+                            cat_values[col].update(group_data[col].unique())
+                except Exception as e:
+                    logger.warning(f"[D1 Cardinality] Failed to load group {file_group_key}: {e}")
+                    continue
+
+        # Compute cardinalities from collected values
+        for col, values in cat_values.items():
+            if len(values) > 0:
+                cardinalities[col] = len(values)
+                logger.debug(f"[D1 Categorical] {col}: {cardinalities[col]} unique values from data")
+
+        return cardinalities
+
     def _update_metadata_after_preload(self):
-        """Update metadata after preloading data to include enriched features."""
+        """Update metadata after preloading data to include enriched features and categorical future lists."""
         if not hasattr(self, "metadata") or not self.metadata:
             return
 
+        # Update indices and columns for temporal enrichment
         if hasattr(self, "_enrich_cat") and self._enrich_cat:
-            # Update cat_cols_list and cat_cardinalities to include temporal features
-            cat_cols_list = list(self.metadata.get("cat_cols_list", []))
-            cat_cardinalities = list(self.metadata.get("cat_cardinalities", []))
-
-            for feature in self._enrich_cat:
-                if feature in self.label_encoders and feature not in cat_cols_list:
-                    categories = self.label_encoders[feature].classes_
-                    n_categories = len(categories)
-                    cat_cols_list.append(feature)
-                    cat_cardinalities.append(n_categories)
-
-            self.metadata["cat_cols_list"] = cat_cols_list
-            self.metadata["cat_cardinalities"] = cat_cardinalities
-
             past_indices = [self.feature_cols.index(col) for col in self._past_cols if col in self.feature_cols]
             self.metadata["idx_past"] = past_indices
             self.metadata["n_past"] = len(self._past_cols) if self._past_cols else 0
-
             self.metadata["past_cols"] = self._past_cols.copy() if self._past_cols else []
 
             future_indices = [self.feature_cols.index(col) for col in self._future_cols if col in self.feature_cols]
             self.metadata["idx_future"] = future_indices
             self.metadata["n_future"] = len(self._future_cols) if self._future_cols else 0
-
             self.metadata["future_cols"] = self._future_cols.copy() if self._future_cols else []
             self.metadata["original_future_cols"] = self._original_future_cols.copy() if self._original_future_cols else None
+
+        # Compute actual cardinalities for all categorical features from data
+        cat_cardinalities_from_data = self._compute_all_categorical_cardinalities()
+
+        if cat_cardinalities_from_data:
+            # Update cat_past_cardinalities with actual values
+            cat_past_list = self.metadata.get("cat_past_list", [])
+            cat_past_cardinalities = self.metadata.get("cat_past_cardinalities", [])
+
+            for i, col in enumerate(cat_past_list):
+                if col in cat_cardinalities_from_data:
+                    cat_past_cardinalities[i] = cat_cardinalities_from_data[col]
+                    logger.debug(
+                        f"[D1 Metadata] Updated {col} cardinality to {cat_cardinalities_from_data[col]} from data (past)"
+                    )
+
+            # Update cat_future_cardinalities with actual values
+            cat_future_list = self.metadata.get("cat_future_list", [])
+            cat_future_cardinalities = self.metadata.get("cat_future_cardinalities", [])
+
+            for i, col in enumerate(cat_future_list):
+                if col in cat_cardinalities_from_data:
+                    cat_future_cardinalities[i] = cat_cardinalities_from_data[col]
+                    logger.debug(
+                        f"[D1 Metadata] Updated {col} cardinality to {cat_cardinalities_from_data[col]} from data (future)"
+                    )
 
     def _preload_data(self):
         """Preload all data into memory for faster access (memory_efficient=False)."""

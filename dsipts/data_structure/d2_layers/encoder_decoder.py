@@ -55,12 +55,12 @@ class EncoderDecoderDataset(Dataset):
         self.feature_scaler = None
         self.target_scaler = None
 
-        # --- OPTIMIZATION: Pre-calculate all static indices ONCE ---
+        # --- OPTIMIZATION: Use pre-calculated indices from D1 metadata ---
         meta = getattr(self.d1_dataset, "metadata", {}) or {}
 
-        # Get D1 metadata (source of truth)
-        self.idx_cat_past = list(meta.get("idx_categorical", []))  # All categorical indices
-        idx_future_all = set(meta.get("idx_future", []))  # All future-known indices
+        # Get D1 metadata (source of truth - all indices pre-calculated in D1)
+        self.idx_cat_past = list(meta.get("idx_cat_past", []))
+        self.idx_cat_future = list(meta.get("idx_cat_future", []))
         idx_targets_full = list(meta.get("idx_targets", []))
         self.global_forecasting = meta.get("global_forecasting", True)
 
@@ -70,10 +70,8 @@ class EncoderDecoderDataset(Dataset):
         # Calculate numeric indices ONCE (all non-categorical)
         self.idx_num = sorted(list(all_idx - set(self.idx_cat_past)))
 
-        # Calculate future categorical indices ONCE (intersection of categorical and future)
-        self.idx_cat_future = sorted(list(set(self.idx_cat_past) & idx_future_all))
-
         # Calculate future numeric indices ONCE (intersection of numeric and future)
+        idx_future_all = set(meta.get("idx_future", []))
         self.idx_num_future = sorted(list(set(self.idx_num) & idx_future_all))
 
         # Calculate target index mapping ONCE
@@ -81,7 +79,7 @@ class EncoderDecoderDataset(Dataset):
         mapped_targets = [num_pos_map[i] for i in idx_targets_full if i in num_pos_map]
         self.idx_target_tensor = torch.tensor(mapped_targets, dtype=torch.long)
 
-        logger.debug("[EncoderDecoderDataset] Pre-calculated indices:")
+        logger.debug("[EncoderDecoderDataset] Using pre-calculated indices from D1:")
         logger.debug(f"  idx_num: {len(self.idx_num)} features")
         logger.debug(f"  idx_cat_past: {len(self.idx_cat_past)} features")
         logger.debug(f"  idx_cat_future: {len(self.idx_cat_future)} features")
@@ -340,13 +338,26 @@ class EncoderDecoder(pl.LightningDataModule):
         self.target_cols = d1_dataset.target_cols
         self.feature_cols = d1_dataset.feature_cols
 
-        # Handle categorical columns
+        # Handle categorical columns - use D1 metadata directly
+        meta = getattr(self.d1_dataset, "metadata", {}) or {}
+
         try:
             self.cat_cols = d1_dataset.cat_cols if d1_dataset.cat_cols else []
+            # Check for categorical features in past/future lists (more accurate than just cat_cols)
+            cat_past_list = meta.get("cat_past_list", [])
+            cat_future_list = meta.get("cat_future_list", [])
+            has_categorical = len(cat_past_list) > 0 or len(cat_future_list) > 0
             logger.debug(f"  cat_cols from D1: {len(self.cat_cols)} cols")
+            logger.debug(f"  cat_past_list: {len(cat_past_list)} features, cat_future_list: {len(cat_future_list)} features")
+            if not has_categorical:
+                logger.debug("  No categorical features in past or future")
         except (AttributeError, TypeError):
             logger.warning("No categorical columns found in D1 dataset or cat_cols is None")
             self.cat_cols = []
+
+        # Use pre-calculated indices from D1 metadata
+        self.idx_cat_past = list(meta.get("idx_cat_past", []))
+        self.idx_cat_future = list(meta.get("idx_cat_future", []))
 
         # Separate categorical and continuous columns
         all_feature_cols = self.feature_cols + self.target_cols
@@ -403,10 +414,10 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Get metadata
         meta = getattr(self.d1_dataset, "metadata", {})
-        idx_categorical = list(meta.get("idx_categorical", []))
+        idx_cat_past = list(meta.get("idx_cat_past", []))
         feature_cols = meta.get("feature_cols", [])
         n_features_total = len(feature_cols)
-        idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
+        idx_num = [i for i in range(n_features_total) if i not in idx_cat_past]
 
         # --- Step 1: Collate all training windows by their D1 group ---
         # This is the "metadata" step
@@ -582,10 +593,10 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Get metadata
         meta = getattr(self.d1_dataset, "metadata", {})
-        idx_categorical = list(meta.get("idx_categorical", []))
+        idx_cat_past = list(meta.get("idx_cat_past", []))
         feature_cols = meta.get("feature_cols", [])
         n_features_total = len(feature_cols)
-        idx_num = [i for i in range(n_features_total) if i not in idx_categorical]
+        idx_num = [i for i in range(n_features_total) if i not in idx_cat_past]
 
         # --- Step 1: Collate all training windows by their D1 group ---
         windows_by_group = defaultdict(list)
@@ -666,20 +677,17 @@ class EncoderDecoder(pl.LightningDataModule):
         self.is_scaler_fitted = True
 
     def fit_scaler(self, train_indices):
-        """
-        Fit the scaler on training data using direct D1 cache access.
-        Delegates to the appropriate method based on memory_efficient mode.
-
-        Args:
-            train_indices: List of D2 window indices for training
-        """
+        """Fit scaler on training data"""
         if self.feature_scaler is None:
             logger.info("No scaling method specified, skipping scaler fitting")
             return
+
         if not self.memory_efficient:
             self._fit_scaler_direct_d1(train_indices)
         else:
             self._fit_scaler_batched(train_indices)
+
+        # Attach fitted scalers to dataset for on-the-fly transformation
         if self.is_scaler_fitted:
             logger.info("Attaching fitted scalers to dataset for on-the-fly transformation in __getitem__()")
             self.dataset.feature_scaler = self.feature_scaler
@@ -774,35 +782,26 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def _pretransform_dataset_direct(self, indices):
         """
-        Pre-transform dataset by directly accessing D1 data
+        Pre-transform dataset by directly accessing D1 data.
+        Uses pre-calculated categorical indices from D1 metadata for optimization.
         """
-        logger.info(f"Pre-transforming {len(indices)} samples")
-
         # Get D1 metadata
         meta = getattr(self.d1_dataset, "metadata", {}) or {}
-        idx_categorical = list(meta.get("idx_categorical", []))
-        feature_cols = meta.get("feature_cols", [])
-        enrich_cat = meta.get("enrich_cat", [])
+
+        # Refresh indices from D1 metadata (in case they were updated during enrichment)
+        idx_cat_past = list(meta.get("idx_cat_past", []))
+        self.idx_cat_past = idx_cat_past  # Update self as well
+        self.idx_cat_future = list(meta.get("idx_cat_future", []))
+
+        # feature_cols = meta.get("feature_cols", [])
         idx_future = list(meta.get("idx_future", []))
         idx_targets_full = list(meta.get("idx_targets", []))
         global_forecasting = meta.get("global_forecasting", True)
 
-        # Ensure temporal features are categorical
-        if enrich_cat and feature_cols:
-            # one-time build of fast lookup structures
-            feature_to_idx = {name: i for i, name in enumerate(feature_cols)}
-            cat_set = set(idx_categorical)  # existing indices
-
-            for temporal_feature in enrich_cat:
-                feature_idx = feature_to_idx.get(temporal_feature)
-                if feature_idx is not None and feature_idx not in cat_set:
-                    idx_categorical.append(feature_idx)
-                    cat_set.add(feature_idx)  # keep set in sync
-
         # Determine numeric indices
         n_features = int(meta.get("n_features", 0))
         all_idx = list(range(n_features))
-        idx_num = [i for i in all_idx if i not in idx_categorical]
+        idx_num = [i for i in all_idx if i not in idx_cat_past]
 
         # ULTRA-FAST EXTRACTION: Group windows by group_idx for efficient extraction
         logger.info("  Extracting data by group (optimized)...")
@@ -861,8 +860,9 @@ class EncoderDecoder(pl.LightningDataModule):
         all_X_future = X_future_all
         all_y = y_future_all
 
-        # Compute future numeric indices for later use
-        future_num_idx = [i for i in idx_future if i in idx_num] if len(idx_num) > 0 else []
+        # Calculate future numeric indices based on current idx_num
+        # (not using pre-calculated from dataset, which may be stale if metadata was updated)
+        future_num_idx = [i for i in idx_num if i in idx_future] if len(idx_num) > 0 else []
 
         # Transform numeric features in-place in the full arrays
         logger.info("  Applying scaling transformation (single call, fully vectorized)...")
@@ -883,12 +883,20 @@ class EncoderDecoder(pl.LightningDataModule):
             )
 
             # Transform numeric features in all_X_future if present
+            # Only transform features that were in the training set (idx_num)
             if len(future_num_idx) > 0:
                 n_windows, future_len, n_features = all_X_future.shape
                 x_num_future = all_X_future[:, :, future_num_idx]
                 reshaped = x_num_future.reshape(-1, len(future_num_idx))
-                transformed = self.feature_scaler.transform(reshaped)
-                all_X_future[:, :, future_num_idx] = transformed.reshape(n_windows, future_len, len(future_num_idx))
+                # Only transform if future features match the fitted scaler's feature count
+                if len(future_num_idx) == self.feature_scaler.n_features_in_:
+                    transformed = self.feature_scaler.transform(reshaped)
+                    all_X_future[:, :, future_num_idx] = transformed.reshape(n_windows, future_len, len(future_num_idx))
+                else:
+                    logger.warning(
+                        f"  Skipping future feature scaling: future has {len(future_num_idx)} features "
+                        f"but scaler expects {self.feature_scaler.n_features_in_} features"
+                    )
 
         # Transform targets if enabled
         if self.target_scaler is not None and hasattr(self.target_scaler, "n_features_in_"):
@@ -898,40 +906,20 @@ class EncoderDecoder(pl.LightningDataModule):
             transformed_y = self.target_scaler.transform(reshaped)
             all_y = transformed_y.reshape(original_shape)
 
-        # Pre-compute future categorical indices once (efficiently using set intersection)
-        future_cat_indices = sorted(list(set(idx_categorical) & set(idx_future)))
+        # Use pre-calculated cardinalities from D1 metadata
+        cat_past_cardinalities = meta.get("cat_past_cardinalities", [])
+        cat_future_cardinalities = meta.get("cat_future_cardinalities", [])
 
-        # Compute separate cardinalities for past and future categorical features
-        cat_cardinalities_all = meta.get("cat_cardinalities", [])
-        cat_cols_list = meta.get("cat_cols_list", [])
-
-        cat_past_cardinalities = []
-        cat_future_cardinalities = []
-
-        if len(idx_categorical) > 0 and len(cat_cols_list) > 0 and len(feature_cols) > 0:
-            # Create mapping from column name to cardinality
-            col_to_cardinality = {col: card for col, card in zip(cat_cols_list, cat_cardinalities_all)}
-
-            # Map past categorical indices to cardinalities (preserving order)
-            for cat_idx in idx_categorical:
-                if cat_idx < len(feature_cols):
-                    col_name = feature_cols[cat_idx]
-                    if col_name in col_to_cardinality:
-                        cat_past_cardinalities.append(col_to_cardinality[col_name])
-
-            # Map future categorical indices to cardinalities (preserving order)
-            for cat_idx in future_cat_indices:
-                if cat_idx < len(feature_cols):
-                    col_name = feature_cols[cat_idx]
-                    if col_name in col_to_cardinality:
-                        cat_future_cardinalities.append(col_to_cardinality[col_name])
-
-        # Store in metadata (removed name tracking - not needed)
+        # Store in metadata
         meta_updated = meta.copy()
         meta_updated["cat_past_cardinalities"] = cat_past_cardinalities
         meta_updated["cat_future_cardinalities"] = cat_future_cardinalities
-        meta_updated["idx_categorical"] = idx_categorical
-        meta_updated["future_cat_indices"] = future_cat_indices
+        meta_updated["idx_cat_past"] = idx_cat_past
+        meta_updated["idx_cat_future"] = self.idx_cat_future
+
+        logger.debug("[D2] Using categorical metadata:")
+        logger.debug(f"  cat_past_cardinalities: {cat_past_cardinalities}")
+        logger.debug(f"  cat_future_cardinalities: {cat_future_cardinalities}")
 
         # Pre-compute idx_target mapping once
         num_pos_map = {orig: pos for pos, orig in enumerate(idx_num)}
@@ -949,9 +937,9 @@ class EncoderDecoder(pl.LightningDataModule):
             list(range(len(all_window_info))),  # Use sequential indices
             all_window_info,  # Use extracted window info
             idx_num,
-            idx_categorical,
+            idx_cat_past,
             future_num_idx,
-            future_cat_indices,
+            self.idx_cat_future,  # Use pre-calculated from dataset
             idx_target_tensor,
             global_forecasting,
             meta_updated,
@@ -1021,10 +1009,36 @@ class EncoderDecoder(pl.LightningDataModule):
         if not train_groups:
             raise ValueError("Global forecasting requires a non-empty 'train' list in split_group_config.")
 
-        # CRITICAL: Validate that groups are mutually exclusive
+        # Normalize group IDs: ensure consistency between split_group_config and window group_ids
+        sample_group_id = self.valid_windows[0]["group_id"] if len(self.valid_windows) > 0 else None
+        windows_use_tuples = isinstance(sample_group_id, tuple)
+
+        def normalize_group_id(gid):
+            # If windows use tuples, convert integers to tuples
+            if windows_use_tuples:
+                if isinstance(gid, int):
+                    return (gid,)
+                elif isinstance(gid, tuple):
+                    return gid
+                else:
+                    # Wrap other types in tuple
+                    return (gid,)
+            # If windows use integers/other, extract from tuples if needed
+            else:
+                if isinstance(gid, tuple) and len(gid) == 1:
+                    return gid[0]
+                else:
+                    return gid
+
+        train_groups = [normalize_group_id(g) for g in train_groups]
+        # Handle None values for val_groups and test_groups
+        val_groups = [normalize_group_id(g) for g in val_groups] if val_groups is not None else None
+        test_groups = [normalize_group_id(g) for g in test_groups] if test_groups is not None else None
+
+        # CRITICAL: Validate that groups are mutually exclusive (skip if None)
         train_set = set(train_groups)
-        val_set = set(val_groups)
-        test_set = set(test_groups)
+        val_set = set(val_groups) if val_groups is not None else set()
+        test_set = set(test_groups) if test_groups is not None else set()
 
         # Check for overlaps: to prevent data leakage between train/val/test
         train_val_overlap = train_set & val_set
@@ -1062,11 +1076,20 @@ class EncoderDecoder(pl.LightningDataModule):
         val_indices = []
         test_indices = []
 
+        # --- Determine splitting strategy based on val_groups and test_groups ---
+        # Strategy A: If val_groups or test_groups have values → Strict group separation
+        # Strategy B: If val_groups and test_groups are empty lists [] → Keep val/test empty (train only)
+        # Strategy C: If val_groups and test_groups are None (not provided) → Split train groups by ratio
+
+        val_groups_provided = val_groups is not None and len(val_groups) > 0
+        test_groups_provided = test_groups is not None and len(test_groups) > 0
+        val_groups_empty = val_groups is not None and len(val_groups) == 0
+        test_groups_empty = test_groups is not None and len(test_groups) == 0
+
         # --- Strategy A: "Strict Group Separation" ---
-        # If user provides val or test groups, we assume they want strict separation.
-        # The split_ratio will *only* be used on the train_groups.
-        if val_groups or test_groups:
-            logger.info("Hybrid group/temporal split: val/test groups provided.")
+        # If user provides val or test groups with actual values, use strict separation
+        if val_groups_provided or test_groups_provided:
+            logger.info("Group-based split: val/test groups provided with values.")
 
             # 1. Add 100% of val_groups to val_indices
             for group_id in val_groups:
@@ -1078,28 +1101,30 @@ class EncoderDecoder(pl.LightningDataModule):
                 test_indices.extend(windows_by_group[group_id])
                 logger.info(f"[D2 split]   Test group '{group_id}': {len(windows_by_group[group_id])} windows -> 100% to test")
 
-            # 3. Split the train_groups using the ratio
-            train_group_windows = []
+            # 3. Add 100% of train_groups to train_indices (NO SPLITTING WITHIN GROUPS)
             for group_id in train_groups:
-                train_group_windows.extend(windows_by_group[group_id])
-                logger.info(f"[D2 split]   Train group '{group_id}': {len(windows_by_group[group_id])} windows")
+                train_indices.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Train group '{group_id}': {len(windows_by_group[group_id])} windows -> 100% to train")
 
-            # Apply ratio to train_group_windows
-            n_train_group = len(train_group_windows)
-            train_end = int(n_train_group * train_ratio)
-            val_end = int(n_train_group * (train_ratio + val_ratio))
+            logger.info("Strict group separation complete (no groups split across splits).")
 
-            # Add the split data to the final lists
-            train_indices.extend(train_group_windows[:train_end])
-            val_indices.extend(train_group_windows[train_end:val_end])
-            test_indices.extend(train_group_windows[val_end:])
+        # --- Strategy B: "Train Only" ---
+        # If user provides empty lists for val/test, keep only train (no val/test)
+        elif val_groups_empty and test_groups_empty:
+            logger.info("Train-only split: val_groups=[] and test_groups=[] provided (keeping val/test empty).")
 
-            logger.info("Hybrid group/temporal split complete.")
+            # Add 100% of train_groups to train_indices only
+            for group_id in train_groups:
+                train_indices.extend(windows_by_group[group_id])
+                logger.info(f"[D2 split]   Train group '{group_id}': {len(windows_by_group[group_id])} windows -> 100% to train")
 
-        # --- Strategy B: "Temporal Split of Train Groups" ---
-        # if user ONLY provides train_groups: they want to create all three sets from that list.
+            # val_indices and test_indices remain empty
+            logger.info("Train-only split complete (val and test are empty).")
+
+        # --- Strategy C: "Temporal Split of Train Groups" ---
+        # If user ONLY provides train_groups (val/test are None), split train groups by ratio
         else:
-            logger.info("Only train_groups provided. Splitting them temporally by split_ratio.")
+            logger.info("Temporal split: Only train_groups provided (val/test are None). Splitting by split_ratio.")
             train_group_windows = []
             for group_id in train_groups:
                 train_group_windows.extend(windows_by_group[group_id])
@@ -1113,7 +1138,7 @@ class EncoderDecoder(pl.LightningDataModule):
             train_indices = train_group_windows[:train_end]
             val_indices = train_group_windows[train_end:val_end]
             test_indices = train_group_windows[val_end:]
-            logger.info("Pure temporal split of train_groups complete.")
+            logger.info("Temporal split of train_groups complete.")
 
         logger.info(f"Final split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
         return train_indices, val_indices, test_indices
