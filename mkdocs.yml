@@ -1,0 +1,26 @@
+site_name: DSIPTS-PTF Documentation
+site_description: Documentation for DSIPTS-PTF project
+
+theme:
+  name: material
+
+repo_name: DSIP-FBK/DSIPTS_PTF
+repo_url: https://github.com/DSIP-FBK/DSIPTS_PTF
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/overview.md
+      - Installation: getting-started/installation.md
+      - Quickstart Pipeline: getting-started/quickstart.md
+  - User Guide:
+      - Data Pipeline: user-guide/data-pipeline.md
+      - Training Workflow: user-guide/training.md
+      - Hydra Configuration Workflow: user-guide/hydra-configs.md
+  - Reference:
+      - D1 Layer: reference/d1-layer.md
+  - Development:
+      - Legacy README: README.md
+
+plugins:
+  - search
