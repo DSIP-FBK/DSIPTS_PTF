@@ -79,7 +79,7 @@ class TestD1D2Pipeline:
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=32)
 
         # Split data
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         # Verify pipeline
         assert len(d1) == 3  # 3 stations
@@ -106,7 +106,7 @@ class TestD1D2Pipeline:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard", scale_targets=True)
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         # Verify scaling
         assert d2.is_scaler_fitted
@@ -128,7 +128,7 @@ class TestD1D2Pipeline:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, batch_size=32)
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         # Create DataLoader
         loader = DataLoader(d2.train_dataset, batch_size=32, shuffle=True)
@@ -161,7 +161,7 @@ class TestD1D2Scaling:
 
         # Create D2 with scaling
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard")
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         # Get D1 sample again (should be unchanged)
         d1_sample_after = d1[0]
@@ -188,7 +188,7 @@ class TestD1D2Scaling:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12, scaling_method="standard")
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         x, y = d2.train_dataset[0]
         scaled = x["x_num_past"]
@@ -221,7 +221,7 @@ class TestD1D2MemoryEfficiency:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12)
-        d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+        d2.setup(stage="fit")
 
         # Should work with memory-efficient D1
         x, y = d2.train_dataset[0]
@@ -243,14 +243,15 @@ class TestD1D2TemporalFlow:
             enrich_cat=["hour", "dow", "month"],
         )
 
-        # Check D1 has temporal features in metadata (cat_cols removed from sample per MR comment)
-        assert "hour" in d1.metadata["cat_cols_list"]
-        assert "dow" in d1.metadata["cat_cols_list"]
-        assert "month" in d1.metadata["cat_cols_list"]
+        # Check D1 has temporal features in metadata
+        assert "hour" in d1.metadata["cat_past_list"]
+        assert "dow" in d1.metadata["cat_past_list"]
+        assert "month" in d1.metadata["cat_past_list"]
 
         # Check D2 propagates temporal features
         d2 = EncoderDecoder(d1, past_len=24, future_len=12)
-        x, y = d2.dataset[0]
+        d2.setup(stage="fit")
+        x, y = d2.train_dataset[0]
 
         # Temporal features should be in both past and future
         assert x["x_cat_past"].shape[1] >= 3  # hour, dow, month (+ possibly group)
@@ -278,7 +279,8 @@ class TestD1D2MultiTarget:
         )
 
         d2 = EncoderDecoder(d1, past_len=24, future_len=12)
-        x, y = d2.dataset[0]
+        d2.setup(stage="fit")
+        x, y = d2.train_dataset[0]
 
         assert y.shape[1] == 3  # 3 targets
         logger.info(f"✓ Multiple targets: y={y.shape}")

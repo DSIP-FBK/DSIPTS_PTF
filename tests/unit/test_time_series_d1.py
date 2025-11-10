@@ -156,18 +156,18 @@ class TestD1CategoricalInfo:
         d1 = MultiSourceTSDataSet(**basic_csv_data)
 
         # Check metadata instead of sample (cat_cols removed from getitem per MR comment)
-        assert "cat_cols_list" in d1.metadata
-        assert "cat_cardinalities" in d1.metadata
-        cat_cols_list = d1.metadata["cat_cols_list"]
-        cat_cardinalities = d1.metadata["cat_cardinalities"]
-        assert len(cat_cols_list) == len(cat_cardinalities)
+        assert "cat_past_list" in d1.metadata
+        assert "cat_past_cardinalities" in d1.metadata
+        cat_past_list = d1.metadata["cat_past_list"]
+        cat_past_cardinalities = d1.metadata["cat_past_cardinalities"]
+        assert len(cat_past_list) == len(cat_past_cardinalities)
 
         # Verify order preservation
-        for col, card in zip(cat_cols_list, cat_cardinalities):
+        for col, card in zip(cat_past_list, cat_past_cardinalities):
             if col in d1.label_encoders:
                 actual = len(d1.label_encoders[col].classes_)
                 assert card == actual
-        logger.info(f"✓ Cat info: {cat_cols_list} -> {cat_cardinalities}")
+        logger.info(f"✓ Cat info: {cat_past_list} -> {cat_past_cardinalities}")
 
 
 class TestD1TemporalEnrichment:
@@ -176,14 +176,14 @@ class TestD1TemporalEnrichment:
     def test_hour_enrichment(self, datetime_data):
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["hour"])
 
-        assert "hour" in d1.metadata["cat_cols_list"]
+        assert "hour" in d1.metadata["cat_past_list"]
         assert "hour" in d1.label_encoders
         logger.info(f"✓ Hour enrichment: {len(d1.label_encoders['hour'].classes_)} hours")
 
     def test_dow_enrichment(self, datetime_data):
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["dow"])
 
-        assert "dow" in d1.metadata["cat_cols_list"]
+        assert "dow" in d1.metadata["cat_past_list"]
         assert len(d1.label_encoders["dow"].classes_) == 7
         logger.info("✓ DOW enrichment: 7 days")
 
@@ -191,7 +191,7 @@ class TestD1TemporalEnrichment:
         d1 = MultiSourceTSDataSet(**datetime_data, enrich_cat=["hour", "dow", "month"])
 
         for feat in ["hour", "dow", "month"]:
-            assert feat in d1.metadata["cat_cols_list"]
+            assert feat in d1.metadata["cat_past_list"]
         logger.info("✓ Multiple enrichment")
 
 
@@ -305,7 +305,7 @@ class TestD1TemporalEdgeCases:
         )
 
         for feat in ["minute", "hour", "dow", "month"]:
-            assert feat in d1.metadata["cat_cols_list"]
+            assert feat in d1.metadata["cat_past_list"]
         logger.info("✓ All temporal features")
 
     def test_temporal_cardinalities_validation(self, temp_dir):
@@ -330,8 +330,8 @@ class TestD1TemporalEdgeCases:
         )
 
         # Check cardinalities in metadata (removed from sample per MR comment)
-        assert "cat_cardinalities" in d1.metadata, "cat_cardinalities missing from metadata"
-        cardinalities = d1.metadata["cat_cardinalities"]
+        assert "cat_past_cardinalities" in d1.metadata, "cat_past_cardinalities missing from metadata"
+        cardinalities = d1.metadata["cat_past_cardinalities"]
 
         # Should have: group (1), hour (24), dow (7)
         assert len(cardinalities) == 3, f"Expected 3 cardinalities, got {len(cardinalities)}: {cardinalities}"
@@ -373,8 +373,8 @@ class TestD1TemporalEdgeCases:
             enrich_cat=["hour", "dow", "month", "minute"],
         )
 
-        cat_cols = d1.metadata["cat_cols_list"]
-        cardinalities = d1.metadata["cat_cardinalities"]
+        cat_cols = d1.metadata["cat_past_list"]
+        cardinalities = d1.metadata["cat_past_cardinalities"]
 
         # STRONG VALIDATION: Check all temporal features present
         assert len(cat_cols) >= 4, f"Expected at least 4 cat_cols, got {len(cat_cols)}"
@@ -408,6 +408,7 @@ class TestD1TemporalEdgeCases:
         df.to_csv(path, index=False)
 
         # Create D1 with temporal enrichment
+        # Note: past_cols and future_cols are explicitly provided to show expected behavior
         d1 = MultiSourceTSDataSet(
             file_paths=[path],
             time_col="timestamp",
@@ -415,6 +416,8 @@ class TestD1TemporalEdgeCases:
             cat_cols=["station"],
             num_cols=["val"],
             target_cols=["target"],
+            past_cols=["station"],  # Explicitly include station in past
+            future_cols=["station"],  # Explicitly include station in future
             enrich_cat=["hour", "dow"],
         )
 
@@ -422,46 +425,65 @@ class TestD1TemporalEdgeCases:
         assert hasattr(d1, "metadata"), "metadata attribute missing"
         metadata = d1.metadata
 
-        # VALIDATION 2: Check cat_cols_list includes temporal features
-        assert "cat_cols_list" in metadata, "cat_cols_list missing from metadata"
-        cat_cols_list = metadata["cat_cols_list"]
+        # VALIDATION 2: Check cat_past_list includes temporal features
+        assert "cat_past_list" in metadata, "cat_past_list missing from metadata"
+        cat_past_list = metadata["cat_past_list"]
 
-        assert "hour" in cat_cols_list, f"hour not in cat_cols_list: {cat_cols_list}"
-        assert "dow" in cat_cols_list, f"dow not in cat_cols_list: {cat_cols_list}"
-        assert "station" in cat_cols_list, f"station not in cat_cols_list: {cat_cols_list}"
-        assert "group" in cat_cols_list, f"group not in cat_cols_list: {cat_cols_list}"
+        assert "hour" in cat_past_list, f"hour not in cat_past_list: {cat_past_list}"
+        assert "dow" in cat_past_list, f"dow not in cat_past_list: {cat_past_list}"
+        assert "station" in cat_past_list, f"station not in cat_past_list: {cat_past_list}"
+        assert "group" in cat_past_list, f"group not in cat_past_list: {cat_past_list}"
 
-        # VALIDATION 3: Check cat_cardinalities matches cat_cols_list
-        assert "cat_cardinalities" in metadata, "cat_cardinalities missing from metadata"
-        cat_cardinalities = metadata["cat_cardinalities"]
+        # VALIDATION 3: Check cat_past_cardinalities matches cat_past_list
+        assert "cat_past_cardinalities" in metadata, "cat_past_cardinalities missing from metadata"
+        cat_past_cardinalities = metadata["cat_past_cardinalities"]
 
-        assert len(cat_cols_list) == len(cat_cardinalities), (
-            f"Length mismatch: cat_cols_list={len(cat_cols_list)}, " f"cat_cardinalities={len(cat_cardinalities)}"
+        assert len(cat_past_list) == len(cat_past_cardinalities), (
+            f"Length mismatch: cat_past_list={len(cat_past_list)}, " f"cat_past_cardinalities={len(cat_past_cardinalities)}"
         )
 
         # VALIDATION 4: Check specific cardinalities for temporal features
-        hour_idx = cat_cols_list.index("hour")
-        dow_idx = cat_cols_list.index("dow")
+        hour_idx = cat_past_list.index("hour")
+        dow_idx = cat_past_list.index("dow")
 
-        assert cat_cardinalities[hour_idx] == 24, f"hour cardinality should be 24, got {cat_cardinalities[hour_idx]}"
-        assert cat_cardinalities[dow_idx] == 7, f"dow cardinality should be 7, got {cat_cardinalities[dow_idx]}"
+        assert cat_past_cardinalities[hour_idx] == 24, f"hour cardinality should be 24, got {cat_past_cardinalities[hour_idx]}"
+        assert cat_past_cardinalities[dow_idx] == 7, f"dow cardinality should be 7, got {cat_past_cardinalities[dow_idx]}"
 
         # VALIDATION 5: Check enrich_cat in metadata
         assert "enrich_cat" in metadata, "enrich_cat missing from metadata"
         assert metadata["enrich_cat"] == ["hour", "dow"], f"enrich_cat mismatch: {metadata['enrich_cat']}"
 
+        # VALIDATION 5b: Check cat_future_list includes temporal features but NOT group
+        assert "cat_future_list" in metadata, "cat_future_list missing from metadata"
+        cat_future_list = metadata["cat_future_list"]
+        assert "hour" in cat_future_list, f"hour not in cat_future_list: {cat_future_list}"
+        assert "dow" in cat_future_list, f"dow not in cat_future_list: {cat_future_list}"
+        assert "station" in cat_future_list, f"station not in cat_future_list: {cat_future_list}"
+        assert "group" not in cat_future_list, f"group should NOT be in cat_future_list: {cat_future_list}"
+
+        # VALIDATION 5c: Check cat_future_cardinalities matches cat_future_list
+        assert "cat_future_cardinalities" in metadata, "cat_future_cardinalities missing from metadata"
+        cat_future_cardinalities = metadata["cat_future_cardinalities"]
+        assert len(cat_future_list) == len(cat_future_cardinalities), (
+            f"Length mismatch: cat_future_list={len(cat_future_list)}, "
+            f"cat_future_cardinalities={len(cat_future_cardinalities)}"
+        )
+
         # VALIDATION 6: Verify __getitem__ matches metadata
         sample = d1[0]
         assert (
-            d1.metadata["cat_cols_list"] == cat_cols_list
-        ), f"getitem cat_cols doesn't match metadata: {sample['cat_cols']} != {cat_cols_list}"
-        assert d1.metadata["cat_cardinalities"] == cat_cardinalities, (
-            f"getitem cat_cardinalities doesn't match metadata: " f"{sample['cat_cardinalities']} != {cat_cardinalities}"
+            d1.metadata["cat_past_list"] == cat_past_list
+        ), f"getitem cat_cols doesn't match metadata: {sample['cat_cols']} != {cat_past_list}"
+        assert d1.metadata["cat_past_cardinalities"] == cat_past_cardinalities, (
+            f"getitem cat_past_cardinalities doesn't match metadata: "
+            f"{sample['cat_past_cardinalities']} != {cat_past_cardinalities}"
         )
 
         logger.info("✓ Temporal enrichment in metadata validated")
-        logger.info(f"  cat_cols_list: {cat_cols_list}")
-        logger.info(f"  cat_cardinalities: {cat_cardinalities}")
+        logger.info(f"  cat_past_list: {cat_past_list}")
+        logger.info(f"  cat_past_cardinalities: {cat_past_cardinalities}")
+        logger.info(f"  cat_future_list: {cat_future_list}")
+        logger.info(f"  cat_future_cardinalities: {cat_future_cardinalities}")
 
     def test_temporal_enrichment_metadata_all_features(self, temp_dir):
         """COMPREHENSIVE: Test metadata with all temporal features."""
@@ -495,13 +517,13 @@ class TestD1TemporalEdgeCases:
 
         metadata = d1.metadata
 
-        # VALIDATION 1: All temporal features in cat_cols_list
-        cat_cols_list = metadata["cat_cols_list"]
+        # VALIDATION 1: All temporal features in cat_past_list
+        cat_past_list = metadata["cat_past_list"]
         for feat in ["minute", "hour", "dow", "month"]:
-            assert feat in cat_cols_list, f"{feat} not in cat_cols_list: {cat_cols_list}"
+            assert feat in cat_past_list, f"{feat} not in cat_past_list: {cat_past_list}"
 
         # VALIDATION 2: Correct cardinalities for each temporal feature
-        cat_cardinalities = metadata["cat_cardinalities"]
+        cat_past_cardinalities = metadata["cat_past_cardinalities"]
         expected_cardinalities = {
             "minute": 4,  # 0, 15, 30, 45
             "hour": 4,  # 0, 6, 12, 18
@@ -510,17 +532,17 @@ class TestD1TemporalEdgeCases:
         }
 
         for feat, expected_card in expected_cardinalities.items():
-            feat_idx = cat_cols_list.index(feat)
-            actual_card = cat_cardinalities[feat_idx]
+            feat_idx = cat_past_list.index(feat)
+            actual_card = cat_past_cardinalities[feat_idx]
             assert actual_card == expected_card, f"{feat} cardinality should be {expected_card}, got {actual_card}"
 
         # VALIDATION 3: Metadata matches getitem
-        assert d1.metadata["cat_cols_list"] == cat_cols_list
-        assert d1.metadata["cat_cardinalities"] == cat_cardinalities
+        assert d1.metadata["cat_past_list"] == cat_past_list
+        assert d1.metadata["cat_past_cardinalities"] == cat_past_cardinalities
 
         logger.info("✓ All temporal features in metadata validated")
-        logger.info(f"  cat_cols_list: {cat_cols_list}")
-        logger.info(f"  cat_cardinalities: {cat_cardinalities}")
+        logger.info(f"  cat_past_list: {cat_past_list}")
+        logger.info(f"  cat_past_cardinalities: {cat_past_cardinalities}")
 
 
 def test_d1_memory_efficient_override_for_dataframes():
@@ -621,6 +643,106 @@ def test_d1_sample_structure_strict():
     assert sample["group_id"] in [0, 1], "group_id should be 0 or 1"
 
     logger.info("✓ D1 sample structure strict test passed")
+
+
+class TestTemporalCardinalityComputation:
+    """Test temporal cardinality computation in both memory_efficient modes."""
+
+    def test_temporal_cardinality_memory_efficient_false(self, temp_dir):
+        """Test temporal cardinality computation with memory_efficient=False."""
+        np.random.seed(42)
+        # Create 7 days of hourly data to get all 7 days of week
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2023-01-01", periods=168, freq="h"),
+                "group": ["A"] * 84 + ["B"] * 84,
+                "station": ["S1", "S2"] * 84,
+                "val": np.random.randn(168),
+                "target": np.random.randn(168),
+            }
+        )
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            cat_cols=["station"],
+            num_cols=["val"],
+            target_cols=["target"],
+            past_cols=["station"],
+            future_cols=["station"],
+            enrich_cat=["hour", "dow"],
+            memory_efficient=False,
+        )
+
+        # Check temporal cardinalities
+        cat_past_list = d1.metadata["cat_past_list"]
+        cat_past_cardinalities = d1.metadata["cat_past_cardinalities"]
+
+        assert "hour" in cat_past_list, "hour should be in cat_past_list"
+        assert "dow" in cat_past_list, "dow should be in cat_past_list"
+
+        hour_idx = cat_past_list.index("hour")
+        dow_idx = cat_past_list.index("dow")
+
+        assert cat_past_cardinalities[hour_idx] == 24, (
+            f"hour cardinality should be 24 (memory_efficient=False), " f"got {cat_past_cardinalities[hour_idx]}"
+        )
+        assert cat_past_cardinalities[dow_idx] == 7, (
+            f"dow cardinality should be 7 (memory_efficient=False), " f"got {cat_past_cardinalities[dow_idx]}"
+        )
+
+        logger.info("✓ Temporal cardinality computation (memory_efficient=False) passed")
+
+    def test_temporal_cardinality_memory_efficient_true(self, temp_dir):
+        """Test temporal cardinality computation with memory_efficient=True."""
+        np.random.seed(42)
+        # Create 7 days of hourly data to get all 7 days of week
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2023-01-01", periods=168, freq="h"),
+                "group": ["A"] * 84 + ["B"] * 84,
+                "station": ["S1", "S2"] * 84,
+                "val": np.random.randn(168),
+                "target": np.random.randn(168),
+            }
+        )
+        path = os.path.join(temp_dir, "data.csv")
+        df.to_csv(path, index=False)
+
+        d1 = MultiSourceTSDataSet(
+            file_paths=[path],
+            time_col="timestamp",
+            group_cols=["group"],
+            cat_cols=["station"],
+            num_cols=["val"],
+            target_cols=["target"],
+            past_cols=["station"],
+            future_cols=["station"],
+            enrich_cat=["hour", "dow"],
+            memory_efficient=True,
+        )
+
+        # Check temporal cardinalities
+        cat_past_list = d1.metadata["cat_past_list"]
+        cat_past_cardinalities = d1.metadata["cat_past_cardinalities"]
+
+        assert "hour" in cat_past_list, "hour should be in cat_past_list"
+        assert "dow" in cat_past_list, "dow should be in cat_past_list"
+
+        hour_idx = cat_past_list.index("hour")
+        dow_idx = cat_past_list.index("dow")
+
+        assert cat_past_cardinalities[hour_idx] == 24, (
+            f"hour cardinality should be 24 (memory_efficient=True), " f"got {cat_past_cardinalities[hour_idx]}"
+        )
+        assert cat_past_cardinalities[dow_idx] == 7, (
+            f"dow cardinality should be 7 (memory_efficient=True), " f"got {cat_past_cardinalities[dow_idx]}"
+        )
+
+        logger.info("✓ Temporal cardinality computation (memory_efficient=True) passed")
 
 
 if __name__ == "__main__":

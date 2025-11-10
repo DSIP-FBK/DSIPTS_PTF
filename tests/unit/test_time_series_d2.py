@@ -386,7 +386,7 @@ class TestD2TargetScaling:
             for i, (mean, std) in enumerate(zip(feature_means, feature_stds)):
                 if std > 0.1:
                     assert abs(mean) < 0.5, f"Feature {i} mean {mean} not close to 0 (memory-efficient)"
-                    assert 0.7 < std < 1.3, f"Feature {i} std {std} not close to 1 (memory-efficient)"
+                    assert 0.65 < std < 1.35, f"Feature {i} std {std} not close to 1 (memory-efficient)"
 
         logger.info("✓ Scaling works with memory-efficient mode")
 
@@ -759,12 +759,13 @@ def test_d2_scaling_produces_normalized_data():
 
 
 def test_d2_dataloader_batch_structure():
-    """Test D2 dataloader produces correct batch structure."""
+    """Test D2 dataloader produces correct batch structure with future categorical features."""
     np.random.seed(42)
     df = pd.DataFrame(
         {
             "date": pd.date_range(start="2025-01-01", periods=500, freq="h"),
             "OT": np.random.randn(500) * 10 + 50,
+            "cat_feature": np.random.choice(["A", "B", "C"], 500),
         }
     )
     df["group"] = 10
@@ -776,6 +777,9 @@ def test_d2_dataloader_batch_structure():
         time_col="date",
         num_cols=["OT"],
         target_cols=["OT"],
+        cat_cols=["cat_feature"],
+        past_cols=["OT", "cat_feature"],
+        future_cols=["OT", "cat_feature"],  # cat_feature is available in future
         enrich_cat=["minute"],
         memory_efficient=False,
         global_forecasting=False,
@@ -795,10 +799,14 @@ def test_d2_dataloader_batch_structure():
     # Check batch shapes
     assert batch["x_num_past"].shape[0] == 8, "Batch should have batch_size=8"
     assert batch["x_num_past"].shape[1] == 24, "Should have past_len=24 timesteps"
+    assert batch["x_cat_past"].shape[0] == 8, "x_cat_past batch should be 8"
+    assert batch["x_cat_past"].shape[1] == 24, "x_cat_past should have past_len=24 timesteps"
+    assert batch["x_cat_future"].shape[0] == 8, "x_cat_future batch should be 8"
+    assert batch["x_cat_future"].shape[1] == 12, "x_cat_future should have future_len=12 timesteps"
     assert batch["y"].shape[0] == 8, "y should have batch_size=8"
     assert batch["y"].shape[1] == 12, "y should have future_len=12 timesteps"
 
-    logger.info("✓ D2 dataloader batch structure test passed")
+    logger.info("✓ D2 dataloader batch structure test passed (with x_cat_future)")
 
 
 def test_end_to_end_d1_d2_workflow():

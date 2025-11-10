@@ -614,7 +614,7 @@ def test_scaling_effects():
         # Split to fit scaler
         train_dataset = None
         if scaling_method:
-            d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+            d2.setup(stage="train")
             train_dataset = d2.train_dataset
 
         analyze_d2_metadata(d2, test_name)
@@ -661,7 +661,7 @@ def test_comprehensive_scenario():
     d2 = EncoderDecoder(d1_dataset=d1, past_len=24, future_len=12, batch_size=16, scaling_method="standard", scale_targets=True)
 
     # Split and fit scaler
-    d2.setup(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+    d2.setup(stage="train")
 
     analyze_d2_metadata(d2, test_name)
     analyze_d2_getitem(d2, test_name, sample_idx=0)
