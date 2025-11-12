@@ -5,9 +5,9 @@
 
 # -- Path setup --------------------------------------------------------------
 
+import importlib.util
 import os
 import sys
-import importlib.util
 from datetime import datetime
 
 # Add the project root to the path so Sphinx can find the modules
@@ -67,9 +67,12 @@ autodoc_default_options = {
     "special-members": "__init__",
     "undoc-members": True,
     "exclude-members": "__weakref__",
+    "show-inheritance": True,
+    "private-members": False,
 }
 autodoc_typehints = "description"
 autodoc_typehints_description_target = "documented"
+autodoc_preserve_defaults = True
 
 # Napoleon settings
 napoleon_google_docstring = True
@@ -120,19 +123,37 @@ root_doc = "index"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-# Theme configuration
+# Theme configuration - Use sphinx_rtd_theme (Read the Docs theme)
 try:
-    import sphinx_pdj_theme
+    import sphinx_rtd_theme
 
-    html_theme = "sphinx_pdj_theme"
-    html_theme_path = [sphinx_pdj_theme.get_html_theme_path()]
-except ImportError:
-    print("WARNING: sphinx_pdj_theme not available. Falling back to sphinx_rtd_theme.")
     html_theme = "sphinx_rtd_theme"
+    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+except ImportError:
+    print("WARNING: sphinx_rtd_theme not available. Falling back to sphinx_pdj_theme.")
+    try:
+        import sphinx_pdj_theme
 
-# Theme options
+        html_theme = "sphinx_pdj_theme"
+        html_theme_path = [sphinx_pdj_theme.get_html_theme_path()]
+    except ImportError:
+        print("WARNING: No theme available. Using default Sphinx theme.")
+        html_theme = "alabaster"
+
+# Theme options for sphinx_rtd_theme
 html_theme_options = {
-    # Add any theme-specific options here
+    "logo_only": False,
+    "display_version": True,
+    "prev_next_buttons_location": "bottom",
+    "style_external_links": False,
+    "vcs_pageview_mode": "",
+    "style_nav_header_background": "#2980B9",
+    # Toc options
+    "collapse_navigation": True,
+    "sticky_navigation": True,
+    "navigation_depth": 4,
+    "includehidden": True,
+    "titles_only": False,
 }
 
 # Static files

@@ -19,6 +19,7 @@ sphinx-apidoc -f -o docs/ dsipts/ \
     --separate \
     --module-first \
     --no-toc \
+    -M \
     --implicit-namespaces
 
 # Optional: Generate bash_examples documentation if needed

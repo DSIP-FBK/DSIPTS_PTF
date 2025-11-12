@@ -55,6 +55,7 @@ jobs:
             --separate \
             --module-first \
             --no-toc \
+            -M \
             --implicit-namespaces
 
       - name: Build documentation
