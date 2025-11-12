@@ -1,0 +1,25 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: mixed-line-ending
+
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: "\\.py$"
+        exclude: |
+          ^(docs/_build/|docs/_autosummary/|site/|dist/|venv/|\.venv/|dsipts\.egg-info/)
+        stages: [commit]
+      - id: ruff-format
+        files: "\\.py$"
+        exclude: |
+          ^(docs/_build/|docs/_autosummary/|site/|dist/|venv/|\.venv/|dsipts\.egg-info/)
+        stages: [commit]

@@ -32,8 +32,20 @@ requirements = [
 docs_requires = [
     "sphinx>=7.0.0",
     "sphinx_pdj_theme>=0.4.0",
-    "sphinx_mdinclude>=0.5.0",
+    "myst-parser>=4.0.0",
+    "sphinx_rtd_theme>=1.0.0",
 ]
+
+# Define test-specific dependencies
+test_requires = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+# Define dev-specific dependencies (combines docs and test requirements)
+dev_requires = docs_requires + test_requires
+
+# Keep the requirements defined above; avoid referencing undefined variables
 
 setup(
     name="dsipts",

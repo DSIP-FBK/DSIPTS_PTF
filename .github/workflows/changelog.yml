@@ -1,0 +1,32 @@
+name: Changelog
+
+on:
+  push:
+    branches:
+      - enh/doc_deployments
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # required to read full history for changelog
+
+      - name: Generate CHANGELOG.md
+        uses: TriPSs/conventional-changelog-action@v5
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          output-file: CHANGELOG.md
+          preset: conventionalcommits
+          release-count: 0
+          skip-on-empty: false
+          skip-version-tag: true
+          tag-prefix: v
+          git-user-name: github-actions[bot]
+          git-user-email: 41898282+github-actions[bot]@users.noreply.github.com
+          git-message: "chore(changelog): update CHANGELOG.md [skip ci]"
