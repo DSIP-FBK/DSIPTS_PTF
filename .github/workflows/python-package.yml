@@ -100,6 +100,7 @@ jobs:
           --separate \
           --module-first \
           --no-toc \
+          -M \
           --implicit-namespaces
     - name: Build documentation
       run: |
@@ -112,17 +113,7 @@ jobs:
         ls -la docs/_build/html/
         echo "Does index.html exist?"
         test -f docs/_build/html/index.html && echo "Yes" || echo "No"
-    - name: Setup Pages
-      uses: actions/configure-pages@v5
-    - name: Upload artifact
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: './docs/_build/html'
-    - name: Deploy to GitHub Pages
-      id: deployment
-      # Deploy on push to main, master, or this feature branch
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/enh/doc_deployments')
-      uses: actions/deploy-pages@v4
+    # Note: Deployment to GitHub Pages is handled by .github/workflows/docs.yml
   build:
     needs: [test, docs]
     runs-on: ubuntu-latest
