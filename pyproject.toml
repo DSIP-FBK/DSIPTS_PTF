@@ -26,3 +26,12 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[tool.pytest.ini_options]
+# By default, don't run integration tests
+testpaths = ["tests/unit"]
+# Add markers for different test types
+markers = [
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+]

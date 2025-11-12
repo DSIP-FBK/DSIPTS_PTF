@@ -10,8 +10,6 @@ tmp
 *.db
 dist*
 /.venv
-/dsipts.egg-info
-venv
 
 # Generated documentation - built by CI/CD only
 /docs/_build/

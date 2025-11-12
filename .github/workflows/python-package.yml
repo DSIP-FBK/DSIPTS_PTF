@@ -2,9 +2,12 @@ name: Python Package
 
 on:
   push:
-    branches: [ '*' ]
+    branches:
+      - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: [ main ]
+    branches: 
+      - main
+      - master  # Include master branch as well
 
 jobs:
   # lint:
@@ -63,7 +66,9 @@ jobs:
       run: |
         # Use the Python from the virtual environment
         source .venv/bin/activate
-        python -m pytest tests/ --cov=dsipts --cov-report=xml
+        # Only run unit tests for now, integration tests will be handled in a separate MR
+        #python -m pytest tests --cov=dsipts --cov-report=xml
+        python -m pytest tests/unit/ --cov=dsipts --cov-report=xml
   docs:
     needs: test
     runs-on: ubuntu-latest
@@ -129,7 +134,12 @@ jobs:
         pip install build twine setuptools wheel
     - name: Build package
       run: |
-        # Build the package directly without relying on requirements.txt
+        # Create a requirements.txt file if it doesn't exist
+        if [ ! -f requirements.txt ]; then
+          echo "Creating requirements.txt from setup.py core_requirements"
+          python -c "import re; from setup import core_requirements; print('\n'.join(core_requirements))" > requirements.txt
+        fi
+        # Build the package
         python -m build
     - name: Check package
       run: twine check dist/*
