@@ -74,22 +74,9 @@ autodoc_typehints = "description"
 autodoc_typehints_description_target = "documented"
 autodoc_preserve_defaults = True
 
-# Mock imports for modules that might cause issues during doc generation
-autodoc_mock_imports = [
-    "aim",
-    "hydra",
-    "omegaconf",
-    "lightning_utilities",
-    "torchmetrics",
-    "numba",
-    "einops",
-    "plotly",
-    "beautifulsoup4",
-    "html5lib",
-    "html_table_parser_python3",
-    "starlette",
-    "pydantic",
-]
+# Mock imports - only for truly optional/problematic packages
+# Most dependencies are now installed via setup.py[docs]
+autodoc_mock_imports = []
 
 # Napoleon settings
 napoleon_google_docstring = True
