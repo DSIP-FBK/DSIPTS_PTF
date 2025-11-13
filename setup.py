@@ -29,9 +29,15 @@ core_requirements = [
 ]
 
 # Define documentation-specific dependencies
+# Include core requirements so autodoc can import modules
 docs_requires = [
     "sphinx_mdinclude>=0.5.0",
     "sphinx_rtd_theme>=1.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "torch>=2.0.0,<2.7.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.2.0",
 ]
 
 # Define test-specific dependencies
