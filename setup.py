@@ -1,5 +1,4 @@
 from setuptools import find_packages, setup
-import os
 
 # Define core requirements - only what's needed for the package to function
 core_requirements = [
@@ -29,12 +28,13 @@ core_requirements = [
 ]
 
 # Define documentation-specific dependencies
+# Must include ALL core requirements so autodoc can import all modules
 docs_requires = [
     "sphinx>=7.0.0",
-    "sphinx_pdj_theme>=0.4.0",
-    "sphinx_mdinclude>=0.5.0",
     "sphinx_rtd_theme>=1.0.0",
-]
+    "myst-parser>=4.0.0",
+    "sphinx_pdj_theme>=0.4.0",
+] + core_requirements  # Include ALL core dependencies for autodoc
 
 # Define test-specific dependencies
 test_requires = [

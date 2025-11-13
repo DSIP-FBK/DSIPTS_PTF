@@ -2,7 +2,6 @@
 *.pyc
 *.ckpt
 __pycache__/
-*.rst
 *.pkl
 *config_used*
 logs
@@ -11,4 +10,9 @@ tmp
 *.db
 dist*
 /.venv
-/dsipts.egg-info
+
+# Generated documentation - built by CI/CD only
+/docs/_build/
+/docs/_autosummary/
+/docs/dsipts.*.rst
+/docs/modules.rst

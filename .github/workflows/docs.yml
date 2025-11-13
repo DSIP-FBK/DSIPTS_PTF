@@ -1,0 +1,106 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - enh/doc_deployments
+  pull_request:
+    branches:
+      - main
+      - master
+      - enh/doc_deployments
+  workflow_dispatch:  # Allow manual triggering
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Clean previous build artifacts
+        run: |
+          rm -rf docs/_build docs/_autosummary docs/dsipts.*.rst docs/modules.rst
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
+      - name: Verify installation
+        run: |
+          echo "Verifying critical imports..."
+          python -c "import pandas, numpy, torch, scipy, sklearn; print('✓ Core dependencies installed')"
+          python -c "import dsipts; print('✓ dsipts package imported successfully')"
+
+      - name: Generate API documentation
+        run: |
+          # Set PYTHONPATH to ensure dsipts can be imported
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+          sphinx-apidoc -f -o docs/ dsipts/ \
+            --separate \
+            --module-first \
+            --no-toc \
+            -M \
+            --implicit-namespaces
+
+      - name: Build documentation
+        run: |
+          # Set PYTHONPATH for Sphinx build
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+          cd docs
+          make clean
+          make html
+          cd ..
+
+      - name: Check for broken links (optional)
+        continue-on-error: true
+        run: |
+          cd docs
+          make linkcheck || true
+          cd ..
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs/_build/html'
+
+  deploy-docs:
+    # Deploy after build-docs succeeds on push to main/master/enh/doc_deployments
+    if: success() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/enh/doc_deployments')
+    needs: build-docs
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

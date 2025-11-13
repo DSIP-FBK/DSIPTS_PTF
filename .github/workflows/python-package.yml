@@ -5,7 +5,7 @@ on:
     branches:
       - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: 
+    branches:
       - main
       - master  # Include master branch as well
 
@@ -69,31 +69,9 @@ jobs:
         # Only run unit tests for now, integration tests will be handled in a separate MR
         #python -m pytest tests --cov=dsipts --cov-report=xml
         python -m pytest tests/unit/ --cov=dsipts --cov-report=xml
-  docs:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        # Install package with docs extras
-        pip install -e ".[docs]"
-        # Explicitly install Sphinx and required extensions
-        pip install sphinx>=7.0.0
-        pip install sphinx_pdj_theme>=0.4.0
-        # Install sphinx_mdinclude directly from GitHub to ensure compatibility
-        pip install git+https://github.com/omnilib/sphinx-mdinclude.git
-    - name: Build documentation
-      run: |
-        cd docs
-        make html
+
   build:
-    needs: [test, docs]
+    needs: test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
