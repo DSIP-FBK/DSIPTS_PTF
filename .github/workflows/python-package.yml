@@ -5,7 +5,7 @@ on:
     branches:
       - '**'  # Match all branches including those with slashes
   pull_request:
-    branches: 
+    branches:
       - main
       - master  # Include master branch as well
 
@@ -88,6 +88,11 @@ jobs:
       with:
         python-version: '3.12'
         cache: 'pip'
+
+    - name: Clean previous build artifacts
+      run: |
+        rm -rf docs/_build docs/_autosummary docs/dsipts.*.rst docs/modules.rst
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
