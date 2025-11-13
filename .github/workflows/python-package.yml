@@ -69,63 +69,9 @@ jobs:
         # Only run unit tests for now, integration tests will be handled in a separate MR
         #python -m pytest tests --cov=dsipts --cov-report=xml
         python -m pytest tests/unit/ --cov=dsipts --cov-report=xml
-  docs:
-    needs: test
-    runs-on: ubuntu-latest
-    # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    # Allow only one concurrent deployment
-    concurrency:
-      group: "pages"
-      cancel-in-progress: true
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-        cache: 'pip'
 
-    - name: Clean previous build artifacts
-      run: |
-        rm -rf docs/_build docs/_autosummary docs/dsipts.*.rst docs/modules.rst
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y pandoc
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        # Install package with docs extras
-        pip install -e ".[docs]"
-        # Ensure myst-parser is installed for modern Markdown support
-        pip install myst-parser>=4.0.0
-    - name: Generate API documentation
-      run: |
-        sphinx-apidoc -f -o docs/ dsipts/ \
-          --separate \
-          --module-first \
-          --no-toc \
-          -M \
-          --implicit-namespaces
-    - name: Build documentation
-      run: |
-        cd docs
-        make clean
-        make html
-        cd ..
-        # Debug - check if the build was successful
-        echo "Checking if HTML files were generated:"
-        ls -la docs/_build/html/
-        echo "Does index.html exist?"
-        test -f docs/_build/html/index.html && echo "Yes" || echo "No"
-    # Note: Deployment to GitHub Pages is handled by .github/workflows/docs.yml
   build:
-    needs: [test, docs]
+    needs: test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
