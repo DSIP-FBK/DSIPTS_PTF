@@ -100,7 +100,7 @@ exclude = ["tests*"]
 
 [tool.ruff]
 select = ["E", "F", "I"]
-ignore = []
+ignore = ["F405"]
 line-length = 130
 target-version = "py38"
 

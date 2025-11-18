@@ -16,7 +16,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
-from .utils import custom_collate_fn
+from .utils import *  # noqa: F401, F403
 
 logger = logging.getLogger(__name__)
 
@@ -166,47 +166,65 @@ class EncoderDecoderDataset(Dataset):
             x["decoder_target"] = y.float()
 
         # Apply scaling on-the-fly if scaler is fitted
-        if self.feature_scaler is not None and hasattr(self.feature_scaler, "n_features_in_"):
-            # Scale x_num_past
-            if "x_num_past" in x and x["x_num_past"].numel() > 0:
-                x_num_past_scaled = self.feature_scaler.transform(x["x_num_past"].numpy())
-                x["x_num_past"] = torch.from_numpy(x_num_past_scaled).float()
+        # Handle both per-group and global scaling
+        if self.feature_scaler is not None:
+            # Determine which scaler to use
+            if isinstance(self.feature_scaler, dict):
+                # Per-group scaling
+                scaler = self.feature_scaler.get(group_idx)
+                if scaler is None:
+                    logger.warning(f"No scaler found for group {group_idx}, skipping scaling")
+            else:
+                # Global scaling
+                scaler = self.feature_scaler if hasattr(self.feature_scaler, "n_features_in_") else None
 
-            # Scale x_num_future (if present)
-            if "x_num_future" in x and x["x_num_future"].numel() > 0:
-                x_num_future_scaled = self.feature_scaler.transform(x["x_num_future"].numpy())
-                x["x_num_future"] = torch.from_numpy(x_num_future_scaled).float()
-
-            # DEBUG: ONE TIME LOGGING OF TRANSFORMED FEATURE VALUES
-            # -------------------------------------------------
-            if not getattr(self, "_logged_transform", False):
-                # Show the first 5 rows (or fewer if the tensor is smaller)
+            if scaler is not None and hasattr(scaler, "n_features_in_"):
+                # Scale x_num_past
                 if "x_num_past" in x and x["x_num_past"].numel() > 0:
-                    rows = min(5, x["x_num_past"].shape[0])
-                    logger.info(
-                        f"[Scaler] First {rows} rows of transformed FEATURES (x_num_past) – raw values:\n"
-                        f"{x['x_num_past'][:rows].cpu().numpy()}"
-                    )
+                    x_num_past_scaled = scaler.transform(x["x_num_past"].numpy())
+                    x["x_num_past"] = torch.from_numpy(x_num_past_scaled).float()
+
+                # Scale x_num_future (if present)
                 if "x_num_future" in x and x["x_num_future"].numel() > 0:
-                    rows = min(5, x["x_num_future"].shape[0])
-                    logger.info(
-                        f"[Scaler] First {rows} rows of transformed FEATURES (x_num_future) – raw values:\n"
-                        f"{x['x_num_future'][:rows].cpu().numpy()}"
-                    )
-                # Mark that we have already logged – prevents repeated output
-                self._logged_transform = True
+                    x_num_future_scaled = scaler.transform(x["x_num_future"].numpy())
+                    x["x_num_future"] = torch.from_numpy(x_num_future_scaled).float()
+
+                # DEBUG: ONE TIME LOGGING OF TRANSFORMED FEATURE VALUES
+                # -------------------------------------------------
+                if not getattr(self, "_logged_transform", False):
+                    # Show the first 5 rows (or fewer if the tensor is smaller)
+                    if "x_num_past" in x and x["x_num_past"].numel() > 0:
+                        rows = min(5, x["x_num_past"].shape[0])
+                        logger.info(
+                            f"[Scaler] First {rows} rows of transformed FEATURES (x_num_past) – raw values:\n"
+                            f"{x['x_num_past'][:rows].cpu().numpy()}"
+                        )
+                    if "x_num_future" in x and x["x_num_future"].numel() > 0:
+                        rows = min(5, x["x_num_future"].shape[0])
+                        logger.info(
+                            f"[Scaler] First {rows} rows of transformed FEATURES (x_num_future) – raw values:\n"
+                            f"{x['x_num_future'][:rows].cpu().numpy()}"
+                        )
+                    # Mark that we have already logged – prevents repeated output
+                    self._logged_transform = True
 
         # Apply target scaling if enabled and y contains data
-        # We check that the scaler exists, has a `transform` method, and that y is a non‑empty tensor.
-        if (
-            self.target_scaler is not None
-            and hasattr(self.target_scaler, "transform")
-            and isinstance(y, torch.Tensor)
-            and y.numel() > 0
-        ):
-            # Transform y using the scaler and convert back to a torch tensor
-            y = torch.from_numpy(self.target_scaler.transform(y.numpy())).float()
-            x["y"] = y
+        # Handle both per-group and global target scaling
+        if self.target_scaler is not None and isinstance(y, torch.Tensor) and y.numel() > 0:
+            # Determine which target scaler to use
+            if isinstance(self.target_scaler, dict):
+                # Per-group scaling
+                target_scaler = self.target_scaler.get(group_idx)
+                if target_scaler is None:
+                    logger.warning(f"No target scaler found for group {group_idx}, skipping target scaling")
+            else:
+                # Global scaling
+                target_scaler = self.target_scaler if hasattr(self.target_scaler, "transform") else None
+
+            if target_scaler is not None and hasattr(target_scaler, "transform"):
+                # Transform y using the scaler and convert back to a torch tensor
+                y = torch.from_numpy(target_scaler.transform(y.numpy())).float()
+                x["y"] = y
         return x, y
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
@@ -259,6 +277,7 @@ class EncoderDecoder(pl.LightningDataModule):
         include_target_in_decoder: bool = False,
         scaling_method: Optional[str] = None,
         scale_targets: bool = False,
+        normalize_per_group: bool = False,
     ):
         """
         Initialize the EncoderDecoder.
@@ -286,6 +305,7 @@ class EncoderDecoder(pl.LightningDataModule):
             include_target_in_decoder: if True include target in decoder part
             scaling_method: Scaler for features. Options: 'standard', 'minmax', or None
             scale_targets: If True, scale target variables using same scaler as features
+            normalize_per_group: If True and global_forecasting=False, fit separate scalers per group
         """
         super().__init__()
 
@@ -303,25 +323,43 @@ class EncoderDecoder(pl.LightningDataModule):
         self.precompute = precompute
         self.scaling_method = scaling_method
         self.scale_targets = scale_targets
+        self.normalize_per_group = normalize_per_group
 
         # Determine if global forecasting is enabled from D1 dataset
         self.global_forecasting = getattr(self.d1_dataset, "global_forecasting", False)
         logger.info(f"Global forecasting mode: {self.global_forecasting}")
+
+        # Validate normalize_per_group: only applicable with local forecasting
+        if normalize_per_group and self.global_forecasting:
+            raise ValueError(
+                "normalize_per_group=True is only applicable with local forecasting (global_forecasting=False). "
+                "Per-group scaling is not supported for global forecasting mode."
+            )
 
         # State flags for setup() method
         self.splits_created = False  # Track if splits have been created
         self.is_scaler_fitted = False  # Track if scaler has been fitted
 
         # Initialize scikit-learn scalers (not fitted yet)
-        if scaling_method == "standard":
+        # For normalize_per_group, we'll use dictionaries to store per-group scalers
+        if normalize_per_group and not self.global_forecasting:
+            # Per-group scalers stored as dict[group_id -> scaler]
+            self.feature_scaler = {}
+            self.target_scaler = {} if scale_targets else None
+            self.per_group_scaling = True
+            logger.info("Per-group scaling enabled (normalize_per_group=True, global_forecasting=False)")
+        elif scaling_method == "standard":
             self.feature_scaler = StandardScaler()
             self.target_scaler = StandardScaler() if scale_targets else None
+            self.per_group_scaling = False
         elif scaling_method == "minmax":
             self.feature_scaler = MinMaxScaler()
             self.target_scaler = MinMaxScaler() if scale_targets else None
+            self.per_group_scaling = False
         elif scaling_method is None or scaling_method == "none":
             self.feature_scaler = None
             self.target_scaler = None
+            self.per_group_scaling = False
         else:
             raise ValueError(f"Unknown scaling method: {scaling_method}. Use 'standard', 'minmax', or None.")
 
@@ -394,12 +432,106 @@ class EncoderDecoder(pl.LightningDataModule):
         self.val_indices = None
         self.test_indices = None
 
+    def _has_window_gaps(self):
+        """
+        Simple check: if step_size > window_size, there will be gaps between windows.
+        Window size = past_len + future_len
+
+        Returns:
+            bool: True if gaps exist (use boolean mask), False if dense (use range extraction)
+        """
+        window_size = self.past_len + self.future_len
+        has_gaps = self.step_size > window_size
+
+        if has_gaps:
+            logger.debug(f"Window gaps detected: step_size={self.step_size} > window_size={window_size}")
+        else:
+            logger.debug(f"Dense windows: step_size={self.step_size} <= window_size={window_size}")
+
+        return has_gaps
+
+    def _extract_with_range(self, group_x_data, group_y_data, windows_in_group, idx_num):
+        """
+        Extract features and targets using contiguous range extraction (fast path).
+        Assumes dense windows (gaps with window_size-step_size>0).
+
+        Args:
+            group_x_data: Group feature tensor
+            group_y_data: Group target tensor
+            windows_in_group: List of windows for this group
+            idx_num: Indices of numeric features
+
+        Returns:
+            tuple: (numeric_features, targets)
+        """
+        if not windows_in_group:
+            return None, None
+
+        # Find range boundaries
+        sorted_windows = sorted(windows_in_group, key=lambda w: w["start_idx"])
+        first_start = sorted_windows[0]["start_idx"]
+        last_window = sorted_windows[-1]
+        last_end = last_window["start_idx"] + last_window["past_len"] + self.future_len
+
+        # Single contiguous slice
+        numeric_features = None
+        if idx_num and group_x_data is not None:
+            numeric_features = group_x_data[first_start:last_end, :][:, idx_num].numpy()
+
+        targets = None
+        if self.scale_targets and group_y_data is not None:
+            targets = group_y_data[first_start:last_end].numpy()
+
+        return numeric_features, targets
+
+    def _extract_with_mask(self, group_x_data, group_y_data, windows_in_group, group_len, idx_num):
+        """
+        Extract features and targets using boolean mask (precise but slower).
+
+        Args:
+            group_x_data: Group feature tensor
+            group_y_data: Group target tensor
+            windows_in_group: List of windows for this group
+            group_len: Total length of the group
+            idx_num: Indices of numeric features
+
+        Returns:
+            tuple: (numeric_features, targets)
+        """
+        # Create boolean masks
+        feature_mask = np.zeros(group_len, dtype=bool)
+        target_mask = np.zeros(group_len, dtype=bool)
+
+        for window in windows_in_group:
+            start_idx = window["start_idx"]
+            past_len = window["past_len"]
+
+            # Paint mask for features (past)
+            past_end_idx = start_idx + past_len
+            feature_mask[start_idx:past_end_idx] = True
+
+            # Paint mask for targets (future)
+            future_end_idx = past_end_idx + self.future_len
+            target_mask[past_end_idx:future_end_idx] = True
+
+        # Extract using masks
+        numeric_features = None
+        if idx_num and group_x_data is not None:
+            numeric_features = group_x_data[feature_mask, :][:, idx_num].numpy()
+
+        targets = None
+        if self.scale_targets and group_y_data is not None:
+            targets = group_y_data[target_mask].numpy()
+
+        return numeric_features, targets
+
     def _fit_scaler_direct_d1(self, train_indices):
         """
-        Optimized scaler fitting for memory_efficient=False.
+        Hybrid scaler fitting with automatic optimization strategy selection.
 
-        This method uses a vectorized "mask" approach for high performance.
-        It iterates ONCE per-group.
+        Uses range extraction for dense windows (step_size <= window_size) and
+        boolean mask for sparse windows (step_size > window_size).
+        This method uses fit() for memory_efficient=False mode.
 
         Args:
             train_indices: List of D2 window indices for training
@@ -410,7 +542,11 @@ class EncoderDecoder(pl.LightningDataModule):
 
         from collections import defaultdict
 
-        logger.info(f"Fitting {self.scaling_method} scaler on training windows (Optimized 'Mask' Method)...")
+        # Simple check: if step_size > window_size, there are gaps
+        has_gaps = self._has_window_gaps()
+        method_name = "boolean_mask" if has_gaps else "range_extraction"
+
+        logger.info(f"Fitting {self.scaling_method} scaler on training windows (Hybrid Method: {method_name})...")
 
         # Get metadata
         meta = getattr(self.d1_dataset, "metadata", {})
@@ -420,7 +556,6 @@ class EncoderDecoder(pl.LightningDataModule):
         idx_num = [i for i in range(n_features_total) if i not in idx_cat_past]
 
         # --- Step 1: Collate all training windows by their D1 group ---
-        # This is the "metadata" step
         windows_by_group = defaultdict(list)
         for window_idx in train_indices:
             window = self.valid_windows[window_idx]
@@ -431,64 +566,101 @@ class EncoderDecoder(pl.LightningDataModule):
         all_features_list = []
         all_targets_list = []
 
-        # --- Step 2: Iterate per-group ---
-        for group_idx, windows_in_group in windows_by_group.items():
-            # Get the *entire* raw data tensor for this group from D1 cache
-            group_data = self.d1_dataset[group_idx]
-            group_x_data = group_data["x"]
-            group_y_data = group_data["y"]
-            group_len = len(group_x_data)
+        # --- Step 2: Iterate per-group with hybrid optimization ---
+        if self.per_group_scaling:
+            # Per-group scaling: fit separate scaler for each group
+            logger.info("  Using per-group scaling (separate scaler per group)")
+            for group_idx, windows_in_group in windows_by_group.items():
+                # Get the entire raw data tensor for this group from D1 cache
+                group_data = self.d1_dataset[group_idx]
+                group_x_data = group_data["x"]
+                group_y_data = group_data["y"]
+                group_len = len(group_x_data)
 
-            # --- Step 3: Create the boolean "Mask" ---
-            feature_mask = np.zeros(group_len, dtype=bool)
-            target_mask = np.zeros(group_len, dtype=bool)
+                # --- Step 3: Extract data using appropriate method ---
+                if has_gaps:
+                    # Use boolean mask for sparse windows
+                    numeric_features, targets = self._extract_with_mask(
+                        group_x_data, group_y_data, windows_in_group, group_len, idx_num
+                    )
+                else:
+                    # Use range extraction for dense windows
+                    numeric_features, targets = self._extract_with_range(group_x_data, group_y_data, windows_in_group, idx_num)
 
-            for window in windows_in_group:
-                start_idx = window["start_idx"]
-                past_len = window["past_len"]
+                # --- Step 4: Fit scaler for this group ---
+                if numeric_features is not None and numeric_features.size > 0:
+                    # Create and fit scaler for this group
+                    if self.scaling_method == "standard":
+                        group_scaler = StandardScaler()
+                    elif self.scaling_method == "minmax":
+                        group_scaler = MinMaxScaler()
+                    else:
+                        group_scaler = StandardScaler()  # Default
 
-                # "Paint" the mask for features (past)
-                past_end_idx = start_idx + past_len
-                feature_mask[start_idx:past_end_idx] = True
+                    group_scaler.fit(numeric_features)
+                    self.feature_scaler[group_idx] = group_scaler
+                    logger.debug(f"    Group {group_idx}: fitted scaler on {numeric_features.shape[0]} timesteps")
 
-                # "Paint" the mask for targets (future)
-                future_end_idx = past_end_idx + self.future_len
-                target_mask[past_end_idx:future_end_idx] = True
+                # Fit target scaler for this group
+                if self.target_scaler is not None and targets is not None and targets.size > 0:
+                    if self.scaling_method == "standard":
+                        group_target_scaler = StandardScaler()
+                    elif self.scaling_method == "minmax":
+                        group_target_scaler = MinMaxScaler()
+                    else:
+                        group_target_scaler = StandardScaler()  # Default
 
-            # --- Step 4: Extract all data for this group in ONE SHOT ---
-            if idx_num and "x" in group_data:
-                # Use the mask to select all training timesteps, then select numeric columns
-                # This is one vectorized slice
-                numeric_features = group_x_data[feature_mask, :][:, idx_num].numpy()
-                if numeric_features.size > 0:
+                    group_target_scaler.fit(targets)
+                    self.target_scaler[group_idx] = group_target_scaler
+
+            logger.info(f"  Per-group scalers fitted for {len(self.feature_scaler)} groups")
+        else:
+            # Global scaling: fit single scaler on all data
+            for group_idx, windows_in_group in windows_by_group.items():
+                # Get the entire raw data tensor for this group from D1 cache
+                group_data = self.d1_dataset[group_idx]
+                group_x_data = group_data["x"]
+                group_y_data = group_data["y"]
+                group_len = len(group_x_data)
+
+                # --- Step 3: Extract data using appropriate method ---
+                if has_gaps:
+                    # Use boolean mask for sparse windows
+                    numeric_features, targets = self._extract_with_mask(
+                        group_x_data, group_y_data, windows_in_group, group_len, idx_num
+                    )
+                else:
+                    # Use range extraction for dense windows
+                    numeric_features, targets = self._extract_with_range(group_x_data, group_y_data, windows_in_group, idx_num)
+
+                # --- Step 4: Collect data ---
+                if numeric_features is not None and numeric_features.size > 0:
                     all_features_list.append(numeric_features)
 
-            if self.scale_targets and "y" in group_data:
-                # Use the target mask
-                targets = group_y_data[target_mask].numpy()
-                if targets.size > 0:
+                if targets is not None and targets.size > 0:
                     all_targets_list.append(targets)
 
-        # --- Step 5: Fit scaler (outside the loop) ---
-        # Fit feature scaler on concatenated raw data
-        if all_features_list:
-            features_array = np.concatenate(all_features_list, axis=0)
-            self.feature_scaler.fit(features_array)
-            logger.info(
-                f"  Feature scaler fitted on {features_array.shape[0]} total D1 timesteps with {features_array.shape[1]} features"
-            )
-        else:
-            logger.warning("No numeric features found to fit scaler.")
+            # --- Step 5: Fit scaler (outside the loop) ---
+            # Fit feature scaler on concatenated raw data
+            if all_features_list:
+                features_array = np.concatenate(all_features_list, axis=0)
+                self.feature_scaler.fit(features_array)
+                logger.info(
+                    f"  Feature scaler fitted on {features_array.shape[0]} total timesteps"
+                    f" with {features_array.shape[1]} features"
+                )
+            else:
+                logger.warning("No numeric features found to fit scaler.")
 
-        # Fit target scaler
-        if self.target_scaler and all_targets_list:
-            targets_array = np.concatenate(all_targets_list, axis=0)
-            self.target_scaler.fit(targets_array)
-            logger.info(
-                f"  Target scaler fitted on {targets_array.shape[0]} total D1 timesteps with {targets_array.shape[1]} targets"
-            )
-        elif self.scale_targets:
-            logger.warning("Target scaling was requested, but no target data was found to fit scaler.")
+            # Fit target scaler
+            if self.target_scaler and all_targets_list:
+                targets_array = np.concatenate(all_targets_list, axis=0)
+                self.target_scaler.fit(targets_array)
+                logger.info(
+                    f"  Target scaler fitted on {targets_array.shape[0]} total timesteps with {targets_array.shape[1]} targets"
+                )
+            elif self.scale_targets:
+                logger.warning("Target scaling was requested, but no target data was found to fit scaler.")
 
         self.is_scaler_fitted = True
 
@@ -561,10 +733,11 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def _fit_scaler_batched(self, train_indices):
         """
-        Optimized scaler fitting using partial_fit on training windows only (for memory_efficient=True).
+        Hybrid scaler fitting with automatic optimization strategy selection.
 
-        This method uses a vectorized "mask" approach for high performance.
-        It iterates ONCE per-group, and calls partial_fit for each group.
+        Uses range extraction for dense windows (step_size <= window_size) and
+        boolean mask for sparse windows (step_size > window_size).
+        This method uses partial_fit() for memory_efficient=True mode.
 
         For extremely large groups that don't fit in memory, it automatically falls back
         to chunked processing.
@@ -587,8 +760,12 @@ class EncoderDecoder(pl.LightningDataModule):
             memory_check_available = False
             logger.debug("psutil not available, memory checking disabled")
 
+        # Simple check: if step_size > window_size, there are gaps
+        has_gaps = self._has_window_gaps()
+        method_name = "boolean_mask" if has_gaps else "range_extraction"
+
         logger.info(
-            f"Fitting {self.scaling_method} scaler using partial_fit on training windows (Optimized 'Grouped Mask' Method)..."
+            f"Fitting {self.scaling_method} scaler using partial_fit on training windows (Hybrid Method: {method_name})..."
         )
 
         # Get metadata
@@ -607,12 +784,13 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info(f"  Fitting on {len(train_indices)} windows across {len(windows_by_group)} D1 groups using partial_fit...")
 
         total_timesteps = 0
+        chunked_count = 0
 
-        # --- Step 2: Iterate per-group ---
+        # --- Step 2: Iterate per-group with hybrid optimization ---
         for i, (group_idx, windows_in_group) in enumerate(windows_by_group.items()):
             logger.info(f"  Processing group {i+1}/{len(windows_by_group)} (Group Index: {group_idx})...")
 
-            # Get group length (cheap operation)
+            # Get group data
             group_data = self.d1_dataset[group_idx]
             group_len = len(group_data["x"])
 
@@ -626,50 +804,50 @@ class EncoderDecoder(pl.LightningDataModule):
 
                 if row_bytes > memory_threshold:
                     use_chunked = True
+                    chunked_count += 1
                     logger.warning(
                         f"    Group {group_idx} requires ~{row_bytes / (1024**3):.2f} GB "
                         f"(>{memory_threshold / (1024**3):.2f} GB available) - using chunked processing"
                     )
 
-            # --- Step 4: Create the boolean "Mask" for this group's training windows ---
-            feature_mask = np.zeros(group_len, dtype=bool)
-            target_mask = np.zeros(group_len, dtype=bool)
-
-            for window in windows_in_group:
-                start_idx = window["start_idx"]
-                past_len = window["past_len"]
-
-                # "Paint" the mask for features (past)
-                past_end_idx = start_idx + past_len
-                feature_mask[start_idx:past_end_idx] = True
-
-                # "Paint" the mask for targets (future)
-                future_end_idx = past_end_idx + self.future_len
-                target_mask[past_end_idx:future_end_idx] = True
-
-            # --- Step 5: Extract data and call partial_fit ---
             if use_chunked:
-                # Use chunked fallback for large groups (pass already-loaded group_data)
+                # --- Step 4a: Chunked fallback for very large groups ---
+                # Create boolean mask for chunked processing
+                feature_mask = np.zeros(group_len, dtype=bool)
+                target_mask = np.zeros(group_len, dtype=bool)
+
+                for window in windows_in_group:
+                    start_idx = window["start_idx"]
+                    past_len = window["past_len"]
+                    past_end_idx = start_idx + past_len
+                    feature_mask[start_idx:past_end_idx] = True
+                    future_end_idx = past_end_idx + self.future_len
+                    target_mask[past_end_idx:future_end_idx] = True
+
                 timesteps = self._fit_scaler_batched_fallback(group_data, group_len, feature_mask, target_mask, idx_num)
                 total_timesteps += timesteps
             else:
-                # Normal processing: use already-loaded group_data and extract with mask
+                # --- Step 4b: Extract data using appropriate method ---
                 group_x_data = group_data["x"]
                 group_y_data = group_data["y"]
 
-                # Fit Features
-                if idx_num and "x" in group_data:
-                    numeric_features = group_x_data[feature_mask, :][:, idx_num].numpy()
-                    if numeric_features.size > 0:
-                        self.feature_scaler.partial_fit(numeric_features)
-                        total_timesteps += numeric_features.shape[0]
+                if has_gaps:
+                    # Use boolean mask for sparse windows
+                    numeric_features, targets = self._extract_with_mask(
+                        group_x_data, group_y_data, windows_in_group, group_len, idx_num
+                    )
+                else:
+                    # Use range extraction for dense windows
+                    numeric_features, targets = self._extract_with_range(group_x_data, group_y_data, windows_in_group, idx_num)
+
+                # --- Step 5: Partial fit ---
+                if numeric_features is not None and numeric_features.size > 0:
+                    self.feature_scaler.partial_fit(numeric_features)
+                    total_timesteps += numeric_features.shape[0]
                     del numeric_features
 
-                # Fit Targets
-                if self.target_scaler and "y" in group_data:
-                    targets = group_y_data[target_mask].numpy()
-                    if targets.size > 0:
-                        self.target_scaler.partial_fit(targets)
+                if targets is not None and targets.size > 0 and self.target_scaler:
+                    self.target_scaler.partial_fit(targets)
                     del targets
 
         # --- Step 6: Finalize ---
