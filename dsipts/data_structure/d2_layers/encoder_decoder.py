@@ -6,6 +6,7 @@ structures from D1 layer data. Handles data scaling as well.
 """
 
 import logging
+from collections import defaultdict
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,7 +89,7 @@ class EncoderDecoderDataset(Dataset):
 
         # Setup LRU cache for transformed windows if enabled
         if self.use_cache:
-            self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_transformed_window_impl)
+            self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_window_no_cache)
 
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
@@ -102,13 +103,6 @@ class EncoderDecoderDataset(Dataset):
     def __len__(self):
         """Return the number of valid windows."""
         return len(self.valid_windows)
-
-    def _get_transformed_window_impl(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
-        """
-        Internal method to get and transform a window (cacheable).
-        This is the expensive part that benefits from caching.
-        """
-        return self._get_window_no_cache(idx)
 
     def _get_window_no_cache(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
@@ -342,21 +336,29 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Initialize scikit-learn scalers (not fitted yet)
         # For normalize_per_group, we'll use dictionaries to store per-group scalers
+        # Initialize scalers based on scaling strategy
+        # Two types of scalers:
+        # 1. Dict of scalers (per-group): {group_idx: StandardScaler(), ...}
+        # 2. Single scaler (global): StandardScaler() or MinMaxScaler()
         if normalize_per_group and not self.global_forecasting:
             # Per-group scalers stored as dict[group_id -> scaler]
-            self.feature_scaler = {}
-            self.target_scaler = {} if scale_targets else None
+            # Each group gets its own scaler fitted on that group's training data
+            self.feature_scaler = {}  # Dict: {group_idx: StandardScaler()}
+            self.target_scaler = {} if scale_targets else None  # Dict: {group_idx: StandardScaler()}
             self.per_group_scaling = True
             logger.info("Per-group scaling enabled (normalize_per_group=True, global_forecasting=False)")
         elif scaling_method == "standard":
-            self.feature_scaler = StandardScaler()
-            self.target_scaler = StandardScaler() if scale_targets else None
+            # Global scaling: single scaler for all groups
+            self.feature_scaler = StandardScaler()  # Single sklearn scaler object
+            self.target_scaler = StandardScaler() if scale_targets else None  # Single sklearn scaler object
             self.per_group_scaling = False
         elif scaling_method == "minmax":
-            self.feature_scaler = MinMaxScaler()
-            self.target_scaler = MinMaxScaler() if scale_targets else None
+            # Global scaling: single scaler for all groups
+            self.feature_scaler = MinMaxScaler()  # Single sklearn scaler object
+            self.target_scaler = MinMaxScaler() if scale_targets else None  # Single sklearn scaler object
             self.per_group_scaling = False
         elif scaling_method is None or scaling_method == "none":
+            # No scaling
             self.feature_scaler = None
             self.target_scaler = None
             self.per_group_scaling = False
@@ -453,7 +455,10 @@ class EncoderDecoder(pl.LightningDataModule):
     def _extract_with_range(self, group_x_data, group_y_data, windows_in_group, idx_num):
         """
         Extract features and targets using contiguous range extraction (fast path).
-        Assumes dense windows (gaps with window_size-step_size>0).
+        Assumes dense windows (step_size <= window_size).
+
+        IMPORTANT: This operates GROUP-WISE, not window-by-window.
+        Extracts ONE contiguous slice covering all windows in the group.
 
         Args:
             group_x_data: Group feature tensor
@@ -487,6 +492,9 @@ class EncoderDecoder(pl.LightningDataModule):
     def _extract_with_mask(self, group_x_data, group_y_data, windows_in_group, group_len, idx_num):
         """
         Extract features and targets using boolean mask (precise but slower).
+
+        IMPORTANT: This operates GROUP-WISE, not window-by-window.
+        Creates boolean mask for entire group, then extracts in ONE operation.
 
         Args:
             group_x_data: Group feature tensor
@@ -540,8 +548,6 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.info("No scaling method specified, skipping scaler fitting")
             return
 
-        from collections import defaultdict
-
         # Simple check: if step_size > window_size, there are gaps
         has_gaps = self._has_window_gaps()
         method_name = "boolean_mask" if has_gaps else "range_extraction"
@@ -556,6 +562,7 @@ class EncoderDecoder(pl.LightningDataModule):
         idx_num = [i for i in range(n_features_total) if i not in idx_cat_past]
 
         # --- Step 1: Collate all training windows by their D1 group ---
+        # Group-wise processing: organize windows by group for efficient extraction
         windows_by_group = defaultdict(list)
         for window_idx in train_indices:
             window = self.valid_windows[window_idx]
