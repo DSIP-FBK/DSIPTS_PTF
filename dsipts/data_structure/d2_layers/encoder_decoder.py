@@ -7,7 +7,9 @@ structures from D1 layer data. Handles data scaling as well.
 
 import logging
 from collections import defaultdict
-from functools import lru_cache
+
+# TODO: lru_cache disabled for now - future task to implement smarter caching
+# from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -18,6 +20,12 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..d1_layers.base_d1 import BaseD1Layer
 from .utils import *  # noqa: F401, F403
+
+# Optional imports for conditional functionality
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +44,9 @@ class EncoderDecoderDataset(Dataset):
         cont_feature_cols: List[str] = None,
         cat_feature_cols: List[str] = None,
         include_target_in_decoder: bool = False,
-        use_cache: bool = True,
-        cache_size: int = 32000,
+        # TODO: caching disabled- future task to implement smarter caching
+        # use_cache: bool = True,
+        # cache_size: int = 32000,
     ):
         """Initialize encoder-decoder dataset."""
 
@@ -49,8 +58,9 @@ class EncoderDecoderDataset(Dataset):
         self.cat_cols = cat_cols or []
         self.cont_feature_cols = cont_feature_cols or []
         self.include_target_in_decoder = include_target_in_decoder
-        self.use_cache = use_cache
-        self.cache_size = cache_size
+        # TODO: disabled caching - currnetly we read only  required window directly from D1
+        # self.use_cache = use_cache
+        # self.cache_size = cache_size
 
         # Scaler placeholders - will be set by EncoderDecoder after fitting
         self.feature_scaler = None
@@ -87,9 +97,17 @@ class EncoderDecoderDataset(Dataset):
         logger.debug(f"  idx_num_future: {len(self.idx_num_future)} features")
         # --- End of optimization ---
 
-        # Setup LRU cache for transformed windows if enabled
-        if self.use_cache:
-            self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_window_no_cache)
+        # TODO: LRU caching disabled for now - its future task to implement smarter caching
+        # for now we read only the required window directly from D1 using metadata
+        # (group positions, indices, etc.) without caching intermediate results..
+        #
+        # future improvements can include:
+        # - Group level caching (cache entire groups that fit in memory)
+        # - adaptive caching based on available memory (auto cal)
+        # - streaming window loader for very large groups
+        #
+        # if self.use_cache:
+        #     self._get_transformed_window = lru_cache(maxsize=cache_size)(self._get_window_no_cache)
 
         # Auto-detect categorical feature columns from D1 dataset if not provided
         if cat_feature_cols is None:
@@ -224,12 +242,21 @@ class EncoderDecoderDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
         Get a sample with encoder-decoder structure.
-        Uses LRU cache if enabled to avoid redundant window extraction and processing.
+
+        Reads only the required window directly from D1 using pre-calculated
+        metadata (group positions, indices). No caching - each call fetches
+        fresh data from D1.
+
+        TODO: Future task - implement smarter caching strategies:
+        - Group-level caching for groups that fit in memory
+        - Adaptive caching based on available memory
         """
-        if self.use_cache:
-            return self._get_transformed_window(idx)
-        else:
-            return self._get_window_no_cache(idx)
+        # TODO: Caching disabled for now - directly read from D1
+        # if self.use_cache:
+        #     return self._get_transformed_window(idx)
+        # else:
+        #     return self._get_window_no_cache(idx)
+        return self._get_window_no_cache(idx)
 
 
 class EncoderDecoderSubset:
@@ -420,8 +447,9 @@ class EncoderDecoder(pl.LightningDataModule):
             cat_cols=getattr(self.d1_dataset, "cat_cols", None),
             cont_feature_cols=getattr(self.d1_dataset, "num_cols", None),
             include_target_in_decoder=include_target_in_decoder,
-            use_cache=self.memory_efficient,
-            cache_size=32000,
+            # TODO: Caching disabled for now - future task
+            # use_cache=self.memory_efficient,
+            # cache_size=32000,
         )
 
         # Placeholders for split datasets
@@ -756,16 +784,12 @@ class EncoderDecoder(pl.LightningDataModule):
             logger.info("No scaling method specified, skipping scaler fitting")
             return
 
-        from collections import defaultdict
-
         # Try to import psutil for memory checking, but don't fail if not available
-        try:
-            import psutil
-
-            memory_check_available = True
-        except ImportError:
+        if psutil is None:
             memory_check_available = False
             logger.debug("psutil not available, memory checking disabled")
+        else:
+            memory_check_available = True
 
         # Simple check: if step_size > window_size, there are gaps
         has_gaps = self._has_window_gaps()
@@ -930,16 +954,12 @@ class EncoderDecoder(pl.LightningDataModule):
 
     def _build_valid_windows(self):
         """Build valid sliding windows from the D1 dataset."""
-        from .utils import build_valid_windows
-
         self.valid_windows = build_valid_windows(
             self.d1_dataset, self.past_len, self.future_len, self.step_size, self.max_samples_per_group
         )
 
     def _is_valid_window(self, past_indices: List[int], future_indices: List[int]) -> bool:
         """Check if a window is valid (has sufficient data)."""
-        from .utils import is_valid_window
-
         return is_valid_window(past_indices, future_indices, self.past_len, self.future_len)
 
     def _pretransform_splits(self, train_dataset, val_dataset, test_dataset):
@@ -992,8 +1012,6 @@ class EncoderDecoder(pl.LightningDataModule):
         logger.info("  Extracting data by group (optimized)...")
 
         # Group windows by their group_idx
-        from collections import defaultdict
-
         windows_by_group = defaultdict(list)
         for idx in indices:
             group_idx = self.valid_windows[idx]["group_idx"]
@@ -1113,7 +1131,6 @@ class EncoderDecoder(pl.LightningDataModule):
 
         # Return vectorized dataset (creates dicts on-demand in __getitem__)
         logger.info(f"✅ Pre-transformation complete: {len(indices)} samples ready (vectorized storage)")
-        from .utils import VectorizedPreTransformedDataset
 
         return VectorizedPreTransformedDataset(
             all_X_past,
@@ -1147,10 +1164,6 @@ class EncoderDecoder(pl.LightningDataModule):
         Returns:
             Tuple of (train_indices, val_indices, test_indices)
         """
-        from collections import defaultdict
-
-        from .utils import create_temporal_splits
-
         train_ratio, val_ratio, test_ratio = self.split_ratio
 
         # Verify ratios sum to 1
