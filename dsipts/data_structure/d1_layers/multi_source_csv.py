@@ -129,8 +129,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         self._feature_cols = self._infer_feature_columns()
         self._validate_enrich_cat()
 
-        self._is_file_read = False  # Flag to track if temporal features have been added to cat columns
-
         if not self._num_cols:  # infer from feature_cols and cat_cols
             all_cols = self._feature_cols + self._target_cols
             self._num_cols = [c for c in all_cols if c not in self._cat_cols]
@@ -278,32 +276,6 @@ class MultiSourceTSDataSet(BaseD1Layer):
         if self._enrich_cat:
             self._update_encoders(chunk)
         return chunk
-
-    def _enrich_temporal_features(self, dataset):
-        """
-        Wrapper function to enrich dataset with temporal categorical features.
-        """
-        if not self._enrich_cat or self._time_col not in dataset.columns:
-            return dataset
-
-        dataset = enrich_temporal_features(dataset, self._enrich_cat, self._time_col)
-
-        # Handle column management (class-specific logic)
-        enriched_features = [col for col in self._enrich_cat if col in dataset.columns]
-
-        # Add temporal categorical features to cat_cols and future_cols only once
-        if enriched_features and not self._is_file_read:
-            if self._cat_cols is None:
-                self._cat_cols = []
-
-            for feature in enriched_features:
-                if feature not in self._cat_cols:
-                    self._cat_cols.append(feature)
-                if self._future_cols is not None and feature not in self._future_cols:
-                    self._future_cols.append(feature)
-
-            self._is_file_read = True
-        return dataset
 
     @property
     def group_cols(self) -> List[str]:
