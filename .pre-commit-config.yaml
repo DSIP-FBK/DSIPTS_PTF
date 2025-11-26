@@ -1,0 +1,34 @@
+# Pre-commit configuration
+# By default, pre-commit only runs on staged files (not the entire codebase)
+
+repos:
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version
+    rev: v0.3.0
+    hooks:
+    -   id: ruff
+        name: ruff (check)
+        # Only run on staged files (default behavior)
+        args: [--fix, --exit-non-zero-on-fix]
+        # Skip very large files to avoid performance issues
+        exclude: '^(docs/|data/|notebooks/)'
+    -   id: ruff-format
+        name: ruff (format)
+        # Skip very large files to avoid performance issues
+        exclude: '^(docs/|data/|notebooks/)'
+
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+    -   id: trailing-whitespace
+        # Skip binary files and very large files
+        exclude: '(^binary/|\.(png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip|tar|gz|db|pkl))$'
+    -   id: end-of-file-fixer
+        # Skip binary files and very large files
+        exclude: '(^binary/|\.(png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip|tar|gz|db|pkl))$'
+    -   id: check-yaml
+    -   id: check-toml
+    -   id: check-added-large-files
+        args: ['--maxkb=500']
+    -   id: debug-statements
+    -   id: check-merge-conflict

@@ -52,7 +52,7 @@ This frist block maybe is common between several architectures:
 - **future_steps** = int. THIS IS CRUCIAL and self explanatory
 - **past_channels** = len(ts.num_var). THIS IS CRUCIAL and self explanatory
 - **future_channels** = len(ts.future_variables). THIS IS CRUCIAL and self explanatory
-- **embs** = [ts.dataset[c].nunique() for c in ts.cat_var]. THIS IS CRUCIAL and self explanatory. 
+- **embs** = [ts.dataset[c].nunique() for c in ts.cat_var]. THIS IS CRUCIAL and self explanatory.
 - **out_channels** = len(ts.target_variables). THIS IS CRUCIAL and self explanatory
 - **cat_emb_dim** = int. Dimension of embedded categorical variables, the choice here is to use a constant value and let the user chose if concatenate or sum the variables
 - **sum_emb** = boolean. If true the contribution of each categorical variable is summed
@@ -92,16 +92,41 @@ or attention based models:
 - **n_layer_decoder** = int. decoder layers
 ---
 
-## How to
-Clone the repo (gitlab or github)
 
-In a pre-generated environment install pytorch and pytorch-lightning (`pip install pytorch-lightning==1.9.4`) then go inside the lib folder and execute:
+## Installation
 
+To get started, first clone the repository:
+```bash
+git clone https://github.com/DSIP-FBK/DSIPTS_PTF.git
+cd DSIPTS_PTF
+```
 
-``
-python setup.py install --force
-``
-In the gitlab repository it is possible to find the documentation (pages) and the package in the package registry. As soon as possible the CI/CD pipeline will update for working also in the github mirrored repository.
+Note: This project uses `pyproject.toml` for dependency management. For a smooth installation, it's recommended to first install `torch` and `pytorch-lightning` matching your system's configuration (e.g., with specific CUDA versions if applicable).
+
+```bash
+pip install torch pytorch-lightning==1.9.4
+```
+
+### Dependency Groups
+
+The project dependencies are organized into logical groups. You can install what you need.
+
+- **Core**: Minimal requirements to use the package.
+  ```bash
+  pip install .
+  ```
+
+- **Development**: All dependencies for development, including tests, docs, and other tools. (Recommended for contributors).
+  ```bash
+  pip install -e .[dev]
+  ```
+
+- **Specific Groups**: You can also install specific optional groups like `docs`, `test`, `optim`, or `web`:
+  ```bash
+  pip install -e .[test,docs]
+  ```
+
+See the `pyproject.toml` file for a complete list of dependencies in each group.
 
 ## AIM
 DSIPTS uses AIM for tracking losses, parameters and other useful information. The first time you use DSIPTS you may need to initialize aim executing:
@@ -110,7 +135,7 @@ aim init
 ```
 
 
-## Test 
+## Test
 You can test your model using a tool timeseries
 
 ```
@@ -158,7 +183,7 @@ from dsipts import Monash, get_freq, TimeSeries, RNN
 import pandas as pd
 m = Monash(filename='monash',baseUrl='https://forecastingdata.org/', rebuild=True)
 ```
-This code will scrap the website and save the URLs connected to the dataset. After downloading it will save a file using the `filename` and, the next time you use it you can set `rebuild=False` avoinding the scraping procedure. 
+This code will scrap the website and save the URLs connected to the dataset. After downloading it will save a file using the `filename` and, the next time you use it you can set `rebuild=False` avoinding the scraping procedure.
 After that `m.table` contains the table. Each dataset has an ID, you can downloadthe data:
 
 ```
@@ -174,8 +199,8 @@ and create a timeseries object using the auxiliary function `get_freq`:
 ```
 serie = pd.DataFrame({'signal':loaded_data.series_value.iloc[0]})
 serie['time'] = pd.date_range(start = loaded_data.start_timestamp.iloc[0], periods=  serie.shape[0],freq=get_freq(frequency))
-serie['cum'] = serie.time.dt.minute  + serie.time.dt.hour 
-starting_point = {'cum':0} ##this can be used for creating the dataset: only samples with cum=0 in the first future lag will be used as samples! 
+serie['cum'] = serie.time.dt.minute  + serie.time.dt.hour
+starting_point = {'cum':0} ##this can be used for creating the dataset: only samples with cum=0 in the first future lag will be used as samples!
 ts = TimeSeries('4656144')
 ts.load_signal(serie.iloc[0:8000],enrich_cat=['dow','hour'],target_variables=['signal'])
 ts.plot();
@@ -212,7 +237,7 @@ config = dict(model_configs =dict(
                                     remove_last= True,
                                     use_bn = False,
                                     optim= 'torch.optim.Adam',
-                                    activation= 'torch.nn.GELU', 
+                                    activation= 'torch.nn.GELU',
                                     verbose = True,
                                     out_channels = len(ts.target_variables)),
                 scheduler_config = dict(gamma=0.1,step_size=100),
@@ -222,14 +247,14 @@ ts.set_model(model_sum,config=config )
 ```
 Once the model is selected, it will display some information like follows:
 ```
-Can   handle multivariate output 
+Can   handle multivariate output
 Can   handle future covariates
 Can   handle categorical covariates
 Can   handle Quantile loss function
 ```
 This can help you knowing which models can be used for multioutput prediction and also if the quantile loss can be used and provide the confidence interval of the predictions.
 
-Notice that there are some free parameters: `cat_emb_dim` for example represent the dimension of the embedded categorical variable, `sum_embs` will sum all the categorical contribution otherwise it will concatenate them. It is possible to use a quantile loss, specify some parameters of the scheduler (StepLR) and optimizer parameters (Adam). 
+Notice that there are some free parameters: `cat_emb_dim` for example represent the dimension of the embedded categorical variable, `sum_embs` will sum all the categorical contribution otherwise it will concatenate them. It is possible to use a quantile loss, specify some parameters of the scheduler (StepLR) and optimizer parameters (Adam).
 
 
 Now we are ready to split and train our model using:
@@ -259,11 +284,11 @@ res.head() ##it contains something like
 3	1	2006-02-15 03:50:01	-2.009074e-07	-8.994338	-0.003175	0.987681	2006-02-15 03:40:01
 4	1	2006-02-15 04:00:01	-2.009074e-07	-8.994338	-0.003175	1.006510	2006-02-15 03:50:01
 ```
-Where signal is the target variable (same name). If a quantile loss has been selected the model generares three signals `_low, _median, _high`, if not the output the model is indicated with `_pred`. Lag indicates wich step the prediction is referred (eg. lag=1 is the frist output of the model along the sequence output). 
+Where signal is the target variable (same name). If a quantile loss has been selected the model generares three signals `_low, _median, _high`, if not the output the model is indicated with `_pred`. Lag indicates wich step the prediction is referred (eg. lag=1 is the frist output of the model along the sequence output).
 
 ```
 import matplotlib.pyplot as plt
-mask = res.prediction_time=='2006-02-14 12:30:01'   
+mask = res.prediction_time=='2006-02-14 12:30:01'
 plt.plot(res.lag[mask],res.signal[mask],label='real')
 plt.plot(res.lag[mask],res.signal_median[mask],label='median')
 plt.legend()
@@ -284,10 +309,10 @@ This example can be found in the [first notebook](/notebooks/1-monash_timeseries
 Most of the models implemented can deal with categorical variables. In particulare there are some variables that you don't need to computed. When declaring a `ts` obejct you can pass also the parameter `enrich_cat=['dow']` that will add to the dataframe (and to the dataloader) the day of the week. Since now you can automatically add `hour, dow, month and minute`. If there are other categorical variables pleas add it to the list while loading your data.
 
 # Models
-A description of each model can be found in the class documentation [here](https://dsip.pages.fbk.eu/dsip_dlresearch/timeseries/). 
+A description of each model can be found in the class documentation [here](https://dsip.pages.fbk.eu/dsip_dlresearch/timeseries/).
 It is possible to use one of the following architectures:
 
-- **RNN** (GRU, LSTM or xLSTM) models, (xLSTM)[https://arxiv.org/pdf/2405.04517] are taken from the [official repo](https://github.com/muditbhargava66/PyxLSTM) 
+- **RNN** (GRU, LSTM or xLSTM) models, (xLSTM)[https://arxiv.org/pdf/2405.04517] are taken from the [official repo](https://github.com/muditbhargava66/PyxLSTM)
 - **Linear** models based on the [official repository](https://github.com/cure-lab/LTSF-Linear), [paper](https://arxiv.org/pdf/2205.13504.pdf). An alternative model (alinear) has been implemented that drop the autoregressive part and uses only covariates
 - **Crossformer** [official repository](https://github.com/cheerss/CrossFormer), [paper](https://openreview.net/forum?id=vSVLM2j9eie)
 - **Informer** [official repository](https://github.com/zhouhaoyi/Informer2020), [paper](https://arxiv.org/abs/2012.07436)
@@ -306,20 +331,112 @@ It is possible to use one of the following architectures:
 - **Samformer**  [paper](https://arxiv.org/pdf/2402.10198) [official repo](https://github.com/romilbert/samformer/tree/main?tab=MIT-1-ov-)
 
 ## Metrics
-In some cases the persistence model is hard to beat and even the more complex model can fall in the persistence trap that propagates the last seen values. 
+In some cases the persistence model is hard to beat and even the more complex model can fall in the persistence trap that propagates the last seen values.
 For this reason a set of metrics can be used trying to avoid the model to get stuck in the trap. In particular we implemented: MSE, L1, sinkhorn divergence, dilated
 loss, quantile loss, MDA and a couple of experimental losses for minimizing the variance or penalizing the persistency. See the base model definition in `dsipts/models/base.py` for more details.
 
 
 
-# Usage 
+# Usage
 In the folder `bash_examples` you can find an example in wich the library is used for training a model from command line using OmegaConf and Hydra with more updated models and examples. Please read the documentation [here](/bash_examples/README.md)
 
+## Feature Scaling
+
+The EncoderDecoder (D2) layer supports automatic scaling of numeric features using scikit-learn's scalers. This is particularly useful for models that are sensitive to feature scales, such as neural networks.
+
+### Using StandardScaler
+
+By default, the EncoderDecoder class can apply StandardScaler to normalize numeric features. The scaler is fitted only on the training dataset and then applied to all splits (train/validation/test).
+
+```python
+from dsipts.data_structure.d1_layers.multi_source_csv import MultiSourceTSDataSet
+from dsipts.data_structure.d2_layers.encoder_decoder import EncoderDecoder
+from sklearn.preprocessing import StandardScaler
+
+# Create D1 dataset
+d1_dataset = MultiSourceTSDataSet(
+    file_paths=["path/to/data.csv"],
+    time_col="time",
+    num_cols=["feature1", "feature2", "feature3"],
+    target_cols=["target"]
+)
+
+# Create D2 dataset with StandardScaler
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=StandardScaler(),  # Enable StandardScaler
+    scale_targets=False       # Don't scale targets
+)
+
+# Split data - scaler is fitted only on training data
+train_dataset, val_dataset, test_dataset = d2_dataset.split_data(
+    train_ratio=0.7,
+    val_ratio=0.15,
+    test_ratio=0.15,
+    method="temporal"
+)
+```
+
+### Custom Scalers
+
+You can use any scikit-learn compatible scaler:
+
+```python
+from sklearn.preprocessing import MinMaxScaler, RobustScaler
+
+# Using MinMaxScaler
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=MinMaxScaler(),  # Scale features to [0,1] range
+    scale_targets=False
+)
+
+# Using RobustScaler (handles outliers better)
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=RobustScaler(),  # Scale using median and quantiles
+    scale_targets=False
+)
+```
+
+### Scaling Target Variables
+
+You can also scale target variables, which can be useful for regression tasks:
+
+```python
+d2_dataset = EncoderDecoder(
+    d1_dataset=d1_dataset,
+    past_len=24,
+    future_len=12,
+    batch_size=16,
+    scaler=StandardScaler(),
+    scale_targets=True  # Enable target scaling
+)
+```
+
+When `scale_targets=True`, a separate scaler instance is created and fitted only on the target variables from the training dataset.
+
+### Notes on Scaling
+
+- Scalers are fitted only on the training dataset to prevent data leakage
+- The same fitted scaler is applied to validation and test datasets
+- Categorical features are never scaled
+- Scaling is applied on-the-fly during dataset access via `__getitem__`
+- Original data in the D1 layer remains unchanged
 
 
 # Modifiers
 
-The VVA model is composed by two steps: the first is a clusterting procedure that divides the input time series in smaller segments an performs a clustering procedure in order to associate a label for each segment. A this point the GPT models works on the sequence of labels trying to predict the next cluster id. Using the centroids of the clusters (and the variace) the final ouput is reconstructed. This pipeline is quite unusual and does not fit with the automation pipeline, but it is possible to use a `Modifier` an abstract class that has 3 methods: 
+The VVA model is composed by two steps: the first is a clusterting procedure that divides the input time series in smaller segments an performs a clustering procedure in order to associate a label for each segment. A this point the GPT models works on the sequence of labels trying to predict the next cluster id. Using the centroids of the clusters (and the variace) the final ouput is reconstructed. This pipeline is quite unusual and does not fit with the automation pipeline, but it is possible to use a `Modifier` an abstract class that has 3 methods:
 - **fit_transform**: called before startin the training process and returns the train/validation pytorch datasets. In the aforementioned model the clustering model is trained.
 - **transform**: used during the inference phase. It is similar to fit_transform but without the training process
 - **inverse_transform**: the output of the model are reverted to the original shape. In the VVA model the centroids are used for reconstruct the predicted timeseries.
@@ -330,7 +447,7 @@ You can find the documentation [here](https://dsip.pages.fbk.eu/dsip_dlresearch/
 or  in the folder `docs/_build/html/index.html`
 If yon need to generate the documentation after some modification just run:
 ```
-./make_doc.sh    
+./make_doc.sh
 ```
 
 For user only: be sure that the the CI file has pages enabled, see [public pages](https://roneo.org/en/gitlab-public-pages-private-repo/)
@@ -339,13 +456,63 @@ For user only: be sure that the the CI file has pages enabled, see [public pages
 If you want to add a model:
 
 - extend the `Base` class in `dsipts/models`
-- add the export line in the `dsipts/__init__.py` 
+- add the export line in the `dsipts/__init__.py`
 - add a full configuration file in `bash_examples/config_test/architecture`
 - optional: add in `bash_script/utils.py` the section to initializate and load the new model
 - add the modifier in `dsipts/data_structure/modifiers.py` if it is required
 
 # Testing
 See [here](/bash_examples/README.md) for the testing session.
+
+# Development Tools
+
+## Pre-commit Hooks
+
+This project uses pre-commit hooks to ensure code quality and consistency. The hooks automatically run before each commit to catch issues early.
+
+### Setup
+
+To set up pre-commit hooks:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install the git hooks
+pre-commit install
+```
+
+### Available Hooks
+
+The following checks are performed automatically before each commit **only on staged files** (not the entire codebase):
+
+- **Ruff**: Lints and formats Python code (excludes docs, data, and notebooks directories)
+- **Trailing whitespace**: Removes trailing whitespace (excludes binary and large files)
+- **End of file fixer**: Ensures files end with a newline (excludes binary and large files)
+- **YAML/TOML checker**: Validates syntax of configuration files
+- **Large file checker**: Prevents committing large files
+- **Debug statement checker**: Catches forgotten debug statements
+- **Merge conflict checker**: Detects unresolved merge conflicts
+
+This focused approach ensures that only files you're actively changing are checked, making the process efficient even with a large codebase.
+
+### Manual Usage
+
+You can manually run all pre-commit hooks on all files:
+
+```bash
+pre-commit run --all-files
+```
+
+Or run on specific files:
+
+```bash
+pre-commit run --files path/to/file1.py path/to/file2.py
+```
+
+## Continuous Integration
+
+The GitHub Actions workflow runs Ruff only on changed Python files to speed up CI checks. See `.github/workflows/python-package.yml` for details.
 
 # Logging
 From version 1.1.0, Aim is used for logging all the experiments and metrics. It is quite easy to install and to use. Just go inside the main folder (`bash_exaples`) and run:
@@ -360,29 +527,29 @@ and then open the url (http://127.0.0.1:43800)[http://127.0.0.1:43800]. It will 
 
 
 ## TODO
-[ ] reduce test time 
+[ ] reduce test time
 
-[ ] add pre-commit hook for code checking (`ruff check --ignore E501,E722 .`)
+[x] add pre-commit hook for code checking with Ruff
 
-[ ] add pre-commit hook testing
+[x] add pre-commit hook testing
 
 [ ] clean code and standardize documentation
 
 [ ] add more sintetic data
 
-[x] add TIDE and iTransformer 
+[x] add TIDE and iTransformer
 
 [ ] clean some old function
 
-[ ] check all the code in the README 
+[ ] check all the code in the README
 
-[ ] check architecture description (which model can be used under certain assumption) 
+[ ] check architecture description (which model can be used under certain assumption)
 
 [ ] complete the classification part (loss function + inference step)
 
-[x] add mirror to git if possible  
+[x] add mirror to git if possible
 
-[x] fix dependencies 
+[x] fix dependencies
 
 [ ] check D3VAE, it seems broken in some configurations
 
